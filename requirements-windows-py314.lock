@@ -1,0 +1,69 @@
+# Video Auto Windows / CPython 3.14 lock.
+#
+# Versions are pinned from the tested .venv production freeze. Hashes are
+# intentionally absent because wheel hashes have not been independently
+# verified for every Windows/Python 3.14 build; setup therefore does not use
+# --require-hashes and does not claim a clean-install acceptance result.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+alembic==1.19.2
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+click==8.5.0
+colorama==0.4.6
+fastapi==0.141.1
+filelock==3.32.3
+flatbuffers==25.12.19
+fsspec==2026.7.0
+greenlet==3.5.5
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+huggingface_hub==1.30.0
+idna==3.19
+iniconfig==2.3.0
+Jinja2==3.1.6
+Mako==1.4.1
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+mpmath==1.3.0
+networkx==3.6.1
+numpy==2.5.3
+onnxruntime==1.29.0
+packaging==26.3
+pathvalidate==3.3.1
+piper-tts==1.8.0
+pip==26.2.1
+pluggy==1.6.0
+protobuf==7.36.1
+psutil==7.2.2
+pydantic==2.13.5
+pydantic_core==2.46.5
+Pygments==2.21.0
+pytest==8.4.2
+python-dotenv==1.2.3
+python-multipart==0.0.32
+PyYAML==6.0.3
+regex==2026.9.3
+rich==15.0.0
+safetensors==0.8.0
+setuptools==78.1.0
+shellingham==1.5.4
+SQLAlchemy==2.0.52
+starlette==1.6.0
+sympy==1.14.0
+tokenizers==0.23.2
+torch==2.14.0+cpu
+tqdm==4.70.0
+transformers==5.16.1
+typer==0.27.2
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.52.4
+watchfiles==1.2.0
+websockets==17.1
