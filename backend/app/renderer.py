@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import settings
 from .media import MediaError, audio_duration, ffprobe, run_command, sha256_file
 from .subtitles import write_ass, write_srt
+from .subtitle_style import normalize_subtitle_style
 
 
 def _escape_filter_path(path: Path) -> str:
@@ -114,7 +115,8 @@ def _transcript_payload(segments: list, duration_ms: int) -> dict:
 def render_video(source: Path, voice_track: Path | None, segments: list, duration_ms: int, destination: Path,
                  *, audio_mode: str = "replace", subtitle_mode: str = "burn", audio_index: int = 0,
                  width: int = 1920, height: int = 1080,
-                 include_original_track: bool = False) -> dict:
+                 include_original_track: bool = False, subtitle_style: dict | None = None) -> dict:
+    style = normalize_subtitle_style(subtitle_style) if subtitle_style is not None else None
     destination.parent.mkdir(parents=True, exist_ok=True)
     srt_path = destination.with_suffix(".srt")
     # The ASS filter parses its filename as filter syntax.  Keep that token a
@@ -122,7 +124,7 @@ def render_video(source: Path, voice_track: Path | None, segments: list, duratio
     # as ``O'Brien.mp4`` cannot terminate the quoted filter expression.
     ass_path = destination.parent / f".videoauto-{uuid.uuid4().hex}.ass"
     if subtitle_mode in {"srt", "soft"}: write_srt(segments, srt_path)
-    if subtitle_mode == "burn": write_ass(segments, ass_path, width, height)
+    if subtitle_mode == "burn": write_ass(segments, ass_path, width, height, style=style)
     partial = destination.with_suffix(destination.suffix + ".partial")
     if partial.exists(): partial.unlink()
     args = [str(settings.ffmpeg), "-y", "-i", str(source)]
@@ -176,6 +178,7 @@ def render_video(source: Path, voice_track: Path | None, segments: list, duratio
         "duration_ms": int(duration_ms),
         "audio_mode": audio_mode,
         "subtitle_mode": subtitle_mode,
+        "subtitle_style": style if subtitle_mode == "burn" else None,
         "include_original_track": include_original,
         "segment_count": len(segments),
         "verification": verification,

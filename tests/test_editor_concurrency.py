@@ -54,7 +54,7 @@ def test_editor_write_rechecks_draft_freeze_after_stale_read(editor_db, monkeypa
     sessions, job_id, segment_id = editor_db
     with sessions() as stale:
         stale.get(Job, job_id); stale.get(Segment, segment_id)
-        api.rerender(job_id)
+        api.rerender(job_id, api.RenderRequest(expected_revision=1))
         monkeypatch.setattr(api, "SessionLocal", lambda: stale)
         with pytest.raises(HTTPException) as error:
             api.patch_segments(job_id, [api.SegmentPatch(id=segment_id, translated_text="too late", revision=1)])

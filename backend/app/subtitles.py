@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .subtitle_style import normalize_subtitle_style
+
 
 def stamp(ms: int) -> str:
     hours, remain = divmod(max(0, ms), 3_600_000)
@@ -66,8 +68,23 @@ def write_srt(segments: list, path: Path) -> Path:
     return path
 
 
-def write_ass(segments: list, path: Path, width: int = 1920, height: int = 1080) -> Path:
+def write_ass(segments: list, path: Path, width: int = 1920, height: int = 1080,
+              style: dict | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
+    options = normalize_subtitle_style(style)
+    font_size = max(1, round(height * options["font_size"] / 100))
+    margin_v = round(height * options["margin_v"] / 100)
+    margin_h = round(width * options["margin_h"] / 100)
+    outline = options["outline_width"] * height / 1080
+    shadow = options["shadow"] * height / 1080
+    # Keep the previous low-resolution defaults for legacy jobs.
+    if style is None:
+        font_size = max(18, font_size)
+        margin_v = max(20, margin_v)
+        margin_h = 40
+        outline, shadow = 3, 1
+    def ass_color(color: str) -> str:
+        return f"&H00{color[5:7]}{color[3:5]}{color[1:3]}"
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -76,14 +93,14 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Noto Sans,{max(18, round(height * 0.055))},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,2,40,40,{max(20, round(height * 0.045))},1
+Style: Default,{options['font_family']},{font_size},{ass_color(options['color'])},&H000000FF,{ass_color(options['outline_color'])},&H80000000,{-1 if options['bold'] else 0},{-1 if options['italic'] else 0},0,0,100,100,0,0,1,{outline:g},{shadow:g},{options['alignment']},{margin_h},{margin_h},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     rows: list[str] = []
     for segment in segments:
-        for start, end, text in caption_cues(segment):
+        for start, end, text in caption_cues(segment, options["max_chars"], options["max_lines"]):
             text = text.replace("\n", "\\N")
             rows.append(f"Dialogue: 0,{ass_stamp(start)},{ass_stamp(end)},Default,,0,0,0,,{text}")
     path.write_text(header + "\n".join(rows) + "\n", encoding="utf-8", newline="\n")

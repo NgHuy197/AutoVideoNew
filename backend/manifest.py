@@ -34,7 +34,7 @@ def _runtime_inputs() -> dict[str, Path]:
     configured = settings.manifest()
     inputs: dict[str, Path] = {}
     for name, value in configured.items():
-        if name in {"data_root", "output_root", "runtime_root"} or not value:
+        if name in {"data_root", "input_root", "output_root", "runtime_root"} or not value:
             continue
         inputs[name] = Path(value)
 

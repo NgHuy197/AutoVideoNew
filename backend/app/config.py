@@ -25,6 +25,7 @@ class AppSettings:
     """Settings are resolved once at process start and can be overridden by DB settings."""
 
     data_root: Path = field(default_factory=lambda: _windows_default("VIDEOAUTO_DATA_ROOT", Path(os.environ.get("LOCALAPPDATA", Path.home())) / "VideoAuto"))
+    input_root: Path = field(default_factory=lambda: _windows_default("VIDEOAUTO_INPUT_ROOT", Path(os.environ.get("USERPROFILE", Path.home())) / "Videos" / "Video Auto Input"))
     output_root: Path = field(default_factory=lambda: _windows_default("VIDEOAUTO_OUTPUT_ROOT", Path(os.environ.get("USERPROFILE", Path.home())) / "Videos" / "Video Auto Exports"))
     ffmpeg: Path = field(default_factory=lambda: Path(os.environ.get("VIDEOAUTO_FFMPEG", "ffmpeg")))
     ffprobe: Path = field(default_factory=lambda: Path(os.environ.get("VIDEOAUTO_FFPROBE", "ffprobe")))
@@ -45,9 +46,12 @@ class AppSettings:
     retry_delays: tuple[int, ...] = (30, 120)
     backup_retention_days: int = 7
     partial_upload_retention_hours: int = 24
+    watch_queue_limit: int = 100
+    watch_batch_size: int = 4
 
     def __post_init__(self) -> None:
         self.data_root = self.data_root.resolve()
+        self.input_root = self.input_root.resolve()
         self.output_root = self.output_root.resolve()
         self.sources_root = self.data_root / "sources"
         self.jobs_root = self.data_root / "jobs"
@@ -62,7 +66,7 @@ class AppSettings:
             self.runtime_root = self.runtime_root.resolve()
 
     def ensure_dirs(self) -> None:
-        for path in (self.data_root, self.output_root, self.sources_root, self.jobs_root, self.inbox_root,
+        for path in (self.data_root, self.input_root, self.output_root, self.sources_root, self.jobs_root, self.inbox_root,
                      self.cache_root, self.logs_root, self.database_root, self.config_root,
                      self.backups_root, self.tools_root):
             path.mkdir(parents=True, exist_ok=True)
@@ -72,7 +76,7 @@ class AppSettings:
         return f"sqlite:///{(self.database_root / 'videoauto.sqlite3').as_posix()}"
 
     def manifest(self) -> dict:
-        return {"data_root": str(self.data_root), "output_root": str(self.output_root),
+        return {"data_root": str(self.data_root), "input_root": str(self.input_root), "output_root": str(self.output_root),
                 "ffmpeg": str(self.ffmpeg), "ffprobe": str(self.ffprobe),
                 "runtime_root": str(self.runtime_root or ""),
                 "whisper_cli": str(self.whisper_cli), "whisper_model": str(self.whisper_model or ""),

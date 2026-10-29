@@ -14,6 +14,7 @@ from .app.db import init_db
 from .app.diagnostics import append_json_line, process_identity
 from .app.process_control import OwnedProcess, close_owned, spawn_owned, terminate_owned
 from .app.service import QueueSupervisor
+from .app.watchdog import ApiWatchdog
 
 
 def _open_byte_lock(path: Path):
@@ -91,20 +92,33 @@ def main() -> None:
     settings.ensure_dirs(); init_db(); lock_handle = _acquire_singleton(); runtime_lock_handle = _acquire_runtime_active_lock(); pid_file = _write_pid_file()
     queue = QueueSupervisor(); queue.start()
     api_process: OwnedProcess | None = None
+    watchdog = ApiWatchdog()
     project_root = Path(__file__).parents[1]
     try:
         while True:
-            if api_process is None or not api_process.is_running():
-                if api_process is not None: time.sleep(2)
-                if api_process is not None:
+            current = time.monotonic()
+            if not queue.is_healthy():
+                queue.record_error("queue-watchdog", "Queue thread stopped or no tick for 15 minutes")
+                raise RuntimeError("Queue watchdog expired; service restart required")
+            if api_process is not None:
+                dead = not api_process.is_running()
+                unhealthy = not dead and watchdog.should_restart(current)
+                if unhealthy:
+                    queue.record_error("api-watchdog", "API failed three liveness probes")
+                    dead = terminate_owned(api_process)
+                if dead:
                     close_owned(api_process)
                     api_process = None
+                    watchdog.failed(current)
+            if api_process is None and current >= watchdog.next_start:
                 try:
                     api_process = spawn_owned(
                         [sys.executable, "-X", "utf8", "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8765"],
                         cwd=project_root, log_path=settings.logs_root / "api.log",
                         job_name=f"VideoAuto-api-{os.getpid()}-{time.time_ns()}")
+                    watchdog.started(time.monotonic())
                 except (OSError, RuntimeError) as exc:
+                    watchdog.failed(time.monotonic())
                     try:
                         append_json_line(settings.logs_root / "supervisor.jsonl", {
                             "time": time.time(), "component": "api-spawn", "error": str(exc), "pid": os.getpid()})

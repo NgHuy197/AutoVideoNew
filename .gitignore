@@ -11,4 +11,5 @@ dist/
 node_modules/
 frontend/dist/
 *.partial
+*.part
 *.tsbuildinfo

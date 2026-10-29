@@ -283,6 +283,9 @@ def _migrate_legacy_schema() -> None:
         "segments": {
             "chunk_index": "INTEGER",
         },
+        "watch_seen": {
+            "preset_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+        },
     }
     with engine.begin() as connection:
         for table, columns in additions.items():

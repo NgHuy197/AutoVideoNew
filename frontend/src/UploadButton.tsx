@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check, CircleAlert, LoaderCircle, RotateCcw, UploadCloud, X } from 'lucide-react'
+import SubtitleStyleEditor from './SubtitleStyleEditor'
+import { DEFAULT_SUBTITLE_STYLE, normalizeSubtitleStyle } from './subtitleStyle'
+import FolderPicker, { normalizeFolder } from './FolderPicker'
 import {
   api,
   csrf,
@@ -43,15 +46,18 @@ type SavedPreset = { id: string; name: string; description?: string | null; conf
 
 const initialPreset: UploadPreset = {
   audio_mode: 'replace', subtitle_mode: 'burn', include_dubbing: true,
-  include_original_track: false, priority: 0,
+  include_original_track: false, review_before_render: false, priority: 0,
 }
 
 function presetLabel(preset: UploadPreset) {
   const audio = preset.audio_mode === 'mix' ? 'trộn audio gốc' : 'thay audio gốc'
   const subtitles = ({ burn: 'phụ đề ghi vào hình', soft: 'track phụ đề bật/tắt', srt: 'SRT rời', none: 'không phụ đề' } as Record<string, string>)[preset.subtitle_mode] || preset.subtitle_mode
   const secondary = preset.include_original_track ? ', giữ track audio gốc' : ''
+  const review = preset.review_before_render ? ', duyệt script trước khi ghép' : ''
   const priority = preset.priority ? `, ưu tiên ${preset.priority}` : ''
-  return `${audio}, ${subtitles}${preset.include_dubbing ? ', có lồng tiếng' : ''}${secondary}${priority}`
+  const folders = `${preset.input_folder ? `, input ${preset.input_folder}` : ''}${preset.output_folder ? `, output ${preset.output_folder}` : ''}`
+  const style = preset.subtitle_style && preset.subtitle_mode === 'burn' ? `, ${preset.subtitle_style.font_family || 'Noto Sans'} ${preset.subtitle_style.font_size ?? 5.5}%` : ''
+  return `${audio}, ${subtitles}${preset.include_dubbing ? ', có lồng tiếng' : ''}${secondary}${review}${priority}${style}${folders}`
 }
 
 function statusLabel(item: UploadItem) {
@@ -89,9 +95,13 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
   const [sessions, setSessions] = useState<UploadSession[]>(() => readUploadSessions())
   const [audioMode, setAudioMode] = useState(initialPreset.audio_mode)
   const [subtitleMode, setSubtitleMode] = useState(initialPreset.subtitle_mode)
+  const [subtitleStyle, setSubtitleStyle] = useState({ ...DEFAULT_SUBTITLE_STYLE })
   const [dub, setDub] = useState(initialPreset.include_dubbing)
   const [originalTrack, setOriginalTrack] = useState(Boolean(initialPreset.include_original_track))
+  const [reviewBeforeRender, setReviewBeforeRender] = useState(Boolean(initialPreset.review_before_render))
   const [priority, setPriority] = useState(Number(initialPreset.priority) || 0)
+  const [inputFolder, setInputFolder] = useState('')
+  const [outputFolder, setOutputFolder] = useState('')
   const [presets, setPresets] = useState<SavedPreset[]>([])
   const [selectedPresetId, setSelectedPresetId] = useState('')
   const [presetName, setPresetName] = useState('')
@@ -106,17 +116,25 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
   const currentPreset = (): UploadPreset => ({
     audio_mode: audioMode,
     subtitle_mode: subtitleMode,
+    subtitle_style: normalizeSubtitleStyle(subtitleStyle),
     include_dubbing: dub,
     include_original_track: originalTrack,
+    review_before_render: reviewBeforeRender,
     priority: Number.isSafeInteger(priority) ? priority : 0,
+    input_folder: inputFolder,
+    output_folder: outputFolder,
   })
 
   const applyPreset = (preset: UploadPreset) => {
     setAudioMode(preset.audio_mode === 'mix' ? 'mix' : 'replace')
     setSubtitleMode(['burn', 'soft', 'srt', 'none'].includes(preset.subtitle_mode) ? preset.subtitle_mode : 'burn')
+    setSubtitleStyle(normalizeSubtitleStyle(preset.subtitle_style))
     setDub(Boolean(preset.include_dubbing))
     setOriginalTrack(Boolean(preset.include_original_track))
+    setReviewBeforeRender(Boolean(preset.review_before_render))
     setPriority(Number.isSafeInteger(preset.priority) ? Number(preset.priority) : 0)
+    setInputFolder(normalizeFolder(preset.input_folder))
+    setOutputFolder(normalizeFolder(preset.output_folder))
   }
 
   const loadPresets = async () => {
@@ -510,6 +528,7 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
       <label>Phụ đề<select value={subtitleMode} onChange={event => setSubtitleMode(event.target.value)}><option value="burn">Ghi vào hình</option><option value="soft">Track bật/tắt</option><option value="srt">SRT rời</option><option value="none">Không phụ đề</option></select></label>
       <label className="check-label"><input type="checkbox" checked={dub} onChange={event => setDub(event.target.checked)} /> Lồng tiếng</label>
       <label className="check-label"><input type="checkbox" checked={originalTrack} onChange={event => setOriginalTrack(event.target.checked)} /> Giữ track gốc phụ</label>
+      <label className="check-label"><input type="checkbox" checked={reviewBeforeRender} onChange={event => setReviewBeforeRender(event.target.checked)} /> Duyệt script trước khi ghép</label>
       <label>Ưu tiên<input className="priority-input" type="number" min="-100" max="100" step="1" value={priority} onChange={event => setPriority(Number.parseInt(event.target.value, 10) || 0)} /></label>
       <button className="primary upload" onClick={() => input.current?.click()}><UploadCloud size={18} /> Thêm video</button>
     </div>
@@ -519,6 +538,11 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
       <button className="secondary" disabled={presetBusy || !selectedPresetId} onClick={() => void savePreset(true)}>Cập nhật</button>
       <button className="text-danger" disabled={presetBusy || !selectedPresetId} onClick={() => void deletePreset()}>Xóa preset</button>
     </div>
+    <div className="storage-folder-selectors">
+      <FolderPicker scope="input" label="Lưu bản gốc vào input" value={inputFolder} onChange={setInputFolder} onError={onError}/>
+      <FolderPicker scope="output" label="Xuất kết quả vào output" value={outputFolder} onChange={setOutputFolder} onError={onError}/>
+    </div>
+    <SubtitleStyleEditor value={subtitleStyle} onChange={setSubtitleStyle} mode={subtitleMode} />
     <p className="upload-help">Tối đa 2 video tải song song. Nếu trình duyệt bị reload, hãy chọn lại đúng tệp; ứng dụng chỉ tiếp tục khi nhận diện nội dung và preset trùng khớp. Tiến độ tính theo khối máy chủ đã xác nhận.</p>
     {sessions.length > 0 && <div className="resume-hint" role="status"><RotateCcw size={14} /><span><strong>{sessions.length} phiên upload dở được lưu trên máy.</strong> Đặt đúng preset bên trên rồi chọn lại tệp để tiếp tục.</span></div>}
     {items.length > 0 && <div className="upload-items" aria-live="polite" aria-label="Tiến độ tải video">

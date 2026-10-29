@@ -27,6 +27,7 @@ class QueueSupervisor:
         self._children: dict[str, OwnedProcess] = {}; self._lock = threading.Lock()
         self._started_at: dict[str, float] = {}
         self._last_maintenance = 0.0
+        self._last_tick = time.monotonic()
         self._last_resource_state: tuple[bool, str] | None = None
         self._last_error: dict[str, float] = {}
         # The inhibitor is deliberately owned by the supervisor thread. It is
@@ -38,7 +39,8 @@ class QueueSupervisor:
         if self._thread and self._thread.is_alive(): return
         self._recover_stale()
         self._reconcile_uploads()
-        self._idle_inhibitor.refresh()
+        self._stop.clear()
+        self._last_tick = time.monotonic()
         self._thread = threading.Thread(target=self._loop, name="videoauto-supervisor", daemon=True); self._thread.start()
 
     def stop(self) -> None:
@@ -46,7 +48,10 @@ class QueueSupervisor:
         # API shutdown must leave child workers alive. A fresh supervisor will reclaim only
         # leases that have stopped heartbeating, so an API reload cannot cancel a job.
         if self._thread: self._thread.join(timeout=5)
-        self._idle_inhibitor.clear()
+
+    def is_healthy(self) -> bool:
+        return bool(self._thread and self._thread.is_alive()
+                    and time.monotonic() - self._last_tick < 900)
 
     @staticmethod
     def _utc_epoch(value: datetime | None) -> float | None:
@@ -55,6 +60,10 @@ class QueueSupervisor:
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
         return value.timestamp()
+
+    def record_error(self, component: str, error: BaseException | str) -> None:
+        """Public entry point for the process supervisor's own failures."""
+        self._record_error(component, error)
 
     def _record_error(self, component: str, error: BaseException | str) -> None:
         """Persist supervisor failures while rate-limiting identical storms."""
@@ -65,6 +74,9 @@ class QueueSupervisor:
         if current - previous < 60.0:
             return
         self._last_error[key] = current
+        # Bound memory even when errors contain a different filename each tick.
+        if len(self._last_error) > 256:
+            self._last_error = {key: current}
         try:
             append_json_line(settings.logs_root / "supervisor.jsonl", {
                 "time": time.time(), "component": component, "error": message,
@@ -248,7 +260,7 @@ class QueueSupervisor:
     def _resource_state(self) -> tuple[bool, str, dict[str, int | float]]:
         """Check every filesystem used by an active job plus available RAM."""
         try:
-            roots = (settings.data_root, settings.output_root)
+            roots = (settings.data_root, settings.input_root, settings.output_root)
             snapshots = [resource_snapshot(root) for root in roots]
             disk_free = min(int(item["disk_free_bytes"]) for item in snapshots)
             if disk_free < settings.min_free_bytes:
@@ -278,9 +290,17 @@ class QueueSupervisor:
                 session.commit()
 
     def _loop(self) -> None:
+        try:
+            self._run_loop()
+        finally:
+            # Windows power requests belong to the thread that created them.
+            self._idle_inhibitor.clear()
+
+    def _run_loop(self) -> None:
         while not self._stop.wait(2):
+            self._last_tick = time.monotonic()
             try:
-                self._recover_stale(); self._handle_control_requests(); self._watch_folders(); self._reap(); self._maintenance()
+                self._background_steps()
                 ready, reason, snapshot = self._resource_state()
                 state = (ready, reason)
                 if state != self._last_resource_state:
@@ -302,15 +322,30 @@ class QueueSupervisor:
                 self._record_error("supervisor-loop", exc)
                 continue
 
+    def _background_steps(self) -> None:
+        # Recovery and reaping must run even when a folder disappears or a
+        # backup fails. Each step retries on the next tick independently.
+        for name, operation in (("recovery", self._recover_stale),
+                                ("controls", self._handle_control_requests),
+                                ("reap", self._reap),
+                                ("watch", self._watch_folders),
+                                ("maintenance", self._maintenance)):
+            try:
+                operation()
+            except Exception as exc:
+                self._record_error(name, exc)
+
     def _maintenance(self) -> None:
         """Run bounded housekeeping without touching external originals or outputs."""
         if time.monotonic() - self._last_maintenance < 3600: return
-        self._last_maintenance = time.monotonic()
         try:
             from .maintenance import reconcile_completing_uploads, run_housekeeping
             reconcile_completing_uploads()
             run_housekeeping()
+            self._last_maintenance = time.monotonic()
         except Exception as exc:
+            # Retry failed housekeeping in one minute, not one hour.
+            self._last_maintenance = time.monotonic() - 3540
             self._record_error("maintenance", exc)
 
     def _resources_ready(self) -> bool:
@@ -420,18 +455,32 @@ class QueueSupervisor:
 
     def _watch_folders(self) -> None:
         from .api import create_source_and_job
+        if not self._resources_ready():
+            return
         with SessionLocal() as session:
+            pending = int(session.scalar(select(func.count()).select_from(Job).where(
+                Job.status.in_(["QUEUED", "RUNNING", "PAUSED", "PAUSING", "CANCELLING", "WAITING_RESOURCES"]))) or 0)
             folders = list(session.scalars(select(WatchFolder).where(WatchFolder.enabled.is_(True))))
+        budget = min(settings.watch_batch_size, max(0, settings.watch_queue_limit - pending))
+        if not budget:
+            return
         for folder in folders:
             root = Path(folder.path)
             if not root.is_dir() or root.is_symlink(): continue
             resolved_root = root.resolve()
             if any(str(resolved_root).lower() == str(excluded.resolve()).lower() or str(resolved_root).lower().startswith(str(excluded.resolve()).lower() + os.sep) for excluded in (settings.data_root, settings.output_root)):
                 continue
-            for path in root.iterdir():
-                if not path.is_file() or path.suffix.lower() not in {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"} or path.name.endswith(".partial"): continue
+            try:
+                paths = list(root.iterdir())
+            except OSError as exc:
+                self._record_error("watch-folder", exc)
+                continue
+            for path in paths:
                 try:
+                    if path.is_symlink() or not path.is_file() or path.suffix.lower() not in {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}: continue
                     stat_a = path.stat(); key = str(path.resolve())
+                    if stat_a.st_size > settings.max_file_bytes:
+                        continue
                     preset = json.loads(folder.preset_json); preset_hash = __import__("hashlib").sha256(json.dumps(preset, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
                     with SessionLocal() as session:
                         seen = session.scalar(select(WatchSeen).where(WatchSeen.folder_id == folder.id, WatchSeen.path == key).order_by(WatchSeen.id.desc()).limit(1))
@@ -448,10 +497,15 @@ class QueueSupervisor:
                         marker_time = marker.created_at.replace(tzinfo=timezone.utc) if marker and marker.created_at and marker.created_at.tzinfo is None else (marker.created_at if marker else None)
                         if not marker or marker.sha256 != "pending" or not marker_time or time.time() - marker_time.timestamp() < settings.stable_seconds: continue
                     digest = sha256_file(path)
+                    if shutil.disk_usage(settings.data_root).free < settings.min_free_bytes + stat_a.st_size:
+                        return
                     source, job = create_source_and_job(path, preset=preset, watch_folder_id=folder.id, expected_sha256=digest)
                     with SessionLocal() as session:
                         marker = session.scalar(select(WatchSeen).where(WatchSeen.folder_id == folder.id, WatchSeen.path == key).order_by(WatchSeen.id.desc()).limit(1))
                         if marker: marker.sha256 = digest; marker.preset_hash = preset_hash; marker.job_id = job.id; session.commit()
+                    budget -= 1
+                    if budget <= 0:
+                        return
                 except (OSError, ValueError): continue
 
 

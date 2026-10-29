@@ -17,7 +17,7 @@ from fastapi import APIRouter, Cookie, Depends, FastAPI, File, Header, HTTPExcep
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import AliasChoices, BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 
 from .config import settings
 from .db import Artifact, Event, Job, Preset, Segment, SessionLocal, Source, StageRun, Upload, WatchFolder, Setting, init_db, json_text, now
@@ -25,6 +25,8 @@ from .media import MediaError, sha256_file
 from .paths import confined, safe_filename
 from .service import supervisor
 from .upload_lock import upload_lock
+from .subtitle_style import SubtitleStyle, normalize_subtitle_style
+from .storage_folders import create_folder, folder_path, list_folders, normalize_folder, roots_overlap
 
 
 class JobCreate(BaseModel):
@@ -32,6 +34,7 @@ class JobCreate(BaseModel):
     preset_id: str | None = None
     audio_mode: str = Field("replace", pattern="^(replace|mix)$")
     subtitle_mode: str = Field("burn", pattern="^(burn|soft|srt|none)$")
+    subtitle_style: SubtitleStyle | None = None
     source_language: str | None = None
     # ``None`` means the container's default audio disposition.  Many files
     # intentionally mark a non-zero track as default.
@@ -40,7 +43,16 @@ class JobCreate(BaseModel):
     include_original_track: bool = Field(default=False, validation_alias=AliasChoices(
         "include_original_track", "include_original_audio", "include_original_audio_track",
         "original_audio_secondary"))
+    review_before_render: bool = False
     priority: int = 0
+    input_folder: str | None = None
+    output_folder: str | None = None
+
+
+class StorageFolderCreate(BaseModel):
+    scope: str = Field(pattern="^(input|output)$")
+    parent: str = Field(default="", max_length=240)
+    name: str = Field(min_length=1, max_length=100)
 
 
 class SegmentPatch(BaseModel):
@@ -53,7 +65,8 @@ class SegmentPatch(BaseModel):
 
 
 class WatchCreate(BaseModel):
-    path: str
+    path: str | None = None
+    input_folder: str | None = None
     preset: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -73,6 +86,10 @@ class PriorityPatch(BaseModel):
     priority: int
 
 
+class RenderRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+
+
 class SettingsPatch(BaseModel):
     data_root: str | None = None
     output_root: str | None = None
@@ -84,6 +101,16 @@ class SettingsPatch(BaseModel):
 
 def _normalize_preset(preset: dict | None) -> dict[str, Any]:
     value = dict(preset or {})
+    for key in ("input_folder", "output_folder"):
+        try:
+            value[key] = normalize_folder(value.get(key, ""))
+        except ValueError as exc:
+            raise ValueError(f"{key} must be a safe relative path") from exc
+    if value.get("subtitle_style") is not None:
+        value["subtitle_style"] = normalize_subtitle_style(value["subtitle_style"])
+    else:
+        # Preserve the persisted shape of old presets and watcher identities.
+        value.pop("subtitle_style", None)
     audio_mode = value.get("audio_mode", "replace")
     subtitle_mode = value.get("subtitle_mode", "burn")
     if audio_mode not in {"replace", "mix"}:
@@ -93,6 +120,9 @@ def _normalize_preset(preset: dict | None) -> dict[str, Any]:
     include_dubbing = value.get("include_dubbing", True)
     if not isinstance(include_dubbing, bool):
         raise ValueError("include_dubbing must be a boolean")
+    review_before_render = value.get("review_before_render", False)
+    if not isinstance(review_before_render, bool):
+        raise ValueError("review_before_render must be a boolean")
     audio_index = value.get("audio_index")
     if audio_index is not None:
         try:
@@ -120,7 +150,8 @@ def _normalize_preset(preset: dict | None) -> dict[str, Any]:
     value = {key: item for key, item in value.items() if key not in
              {"include_original_audio", "include_original_audio_track", "original_audio_secondary"}}
     return {**value, "audio_mode": audio_mode, "subtitle_mode": subtitle_mode,
-            "include_dubbing": include_dubbing, "audio_index": audio_index,
+            "include_dubbing": include_dubbing, "review_before_render": review_before_render,
+            "audio_index": audio_index,
             "source_language": source_language, "include_original_track": include_original_track,
             "priority": priority}
 
@@ -164,6 +195,23 @@ def create_source_and_job(path: Path, preset: dict | None, watch_folder_id: str 
                 source.path = str(target)
             mode = _normalize_preset(preset)
             if upload_id:
+                category = folder_path(settings.input_root, mode["input_folder"])
+                category.mkdir(parents=True, exist_ok=True)
+                organized = category / safe_filename(original_name or path.name)
+                if organized.exists() and not secrets.compare_digest(sha256_file(organized), digest):
+                    organized = category / f"{organized.stem} ({digest[:8]}){organized.suffix}"
+                if not organized.exists():
+                    if shutil.disk_usage(category).free < settings.min_free_bytes + size:
+                        raise ValueError("not enough free disk space to organize the input copy")
+                    partial_organized = category / f".{organized.name}.{secrets.token_hex(8)}.partial"
+                    try:
+                        shutil.copy2(path, partial_organized)
+                        if not secrets.compare_digest(sha256_file(partial_organized), digest):
+                            raise ValueError("organized input copy checksum mismatch")
+                        os.replace(partial_organized, organized)
+                    finally:
+                        partial_organized.unlink(missing_ok=True)
+            if upload_id:
                 # This lookup is the durable half of upload finalization
                 # idempotency. A process can crash after this insert and before
                 # marking Upload.COMPLETED; a later completion reuses the job.
@@ -173,10 +221,24 @@ def create_source_and_job(path: Path, preset: dict | None, watch_folder_id: str 
             if watch_folder_id:
                 # Include the immutable preset in deduplication, even after an earlier
                 # job completed, so rescans cannot enqueue a duplicate generation.
+                # Jobs persisted before a default-valued key existed omit it, and
+                # those keys were added independently, so accept every subset.
+                variants = [dict(mode)]
+                optional_keys = [key for key in ("review_before_render", "input_folder", "output_folder")
+                                 if key in mode and not mode[key]]
+                for key in optional_keys:
+                    variants += [{k: v for k, v in item.items() if k != key} for item in variants]
+                accepted_modes = list(dict.fromkeys(json_text(item) for item in variants))
                 same_preset = session.scalar(select(Job).where(Job.source_id == source.id,
-                    Job.mode_json == json_text(mode), Job.status != "CANCELLED").order_by(Job.created_at.desc()).limit(1))
+                    Job.mode_json.in_(accepted_modes), Job.status != "CANCELLED").order_by(Job.created_at.desc()).limit(1))
                 if same_preset:
                     return source, same_preset
+                # Web uploads keep an organized copy under input_root. When that
+                # folder is also watched, the copy must not start a second job.
+                uploaded = session.scalar(select(Job).where(Job.source_id == source.id,
+                    Job.upload_id.is_not(None), Job.status != "CANCELLED").order_by(Job.created_at.desc()).limit(1))
+                if uploaded:
+                    return source, uploaded
             job_name = safe_filename(original_name or source.original_name or path.name)
             job = Job(source_id=source.id, upload_id=upload_id, original_name=job_name, display_name=job_name,
                       mode_json=json_text(mode), config_json=json_text(mode), settings_snapshot_json=json_text(settings.snapshot()),
@@ -417,6 +479,11 @@ def create_job(payload: JobCreate, _: None = Depends(_csrf)):
         source = session.get(Source, payload.source_id)
         if not source: raise HTTPException(404, "source not found")
         values = payload.model_dump()
+        if "subtitle_style" not in payload.model_fields_set:
+            values.pop("subtitle_style", None)
+        for field in ("input_folder", "output_folder"):
+            if field not in payload.model_fields_set:
+                values.pop(field, None)
         preset_id = values.pop("preset_id", None)
         if preset_id:
             preset = session.get(Preset, preset_id)
@@ -443,6 +510,51 @@ def list_jobs(status: str | None = None, limit: int = Query(100, ge=1, le=500)):
         query = select(Job).order_by(Job.created_at.desc()).limit(limit)
         if status: query = select(Job).where(Job.status == status).order_by(Job.created_at.desc()).limit(limit)
         return [_job_dict(session, j) for j in session.scalars(query)]
+
+
+@router.get("/jobs/page")
+def page_jobs(limit: int = Query(10, ge=1, le=100), offset: int = Query(0, ge=0)):
+    with SessionLocal() as session:
+        status_counts = dict(session.execute(select(Job.status, func.count()).group_by(Job.status)).all())
+        items = session.scalars(select(Job).order_by(Job.created_at.desc(), Job.id.desc()).offset(offset).limit(limit))
+        return {
+            "items": [_job_dict(session, job) for job in items],
+            "total": sum(status_counts.values()),
+            "limit": limit,
+            "offset": offset,
+            "counts": {
+                "active": sum(status_counts.get(status, 0) for status in (
+                    "QUEUED", "RUNNING", "PAUSED", "PAUSING", "CANCELLING", "RETRY_WAIT", "WAITING_RESOURCES")),
+                "done": sum(status_counts.get(status, 0) for status in ("COMPLETED", "COMPLETED_WITH_WARNINGS")),
+                "failed": sum(status_counts.get(status, 0) for status in ("FAILED", "DRAFT")),
+            },
+        }
+
+
+@router.delete("/jobs/{job_id}")
+def delete_job(job_id: str, _: None = Depends(_csrf)):
+    removable_statuses = (
+        "QUEUED", "RETRY_WAIT", "WAITING_RESOURCES", "PAUSED", "DRAFT", "FAILED", "CANCELLED",
+        "COMPLETED", "COMPLETED_WITH_WARNINGS", "SKIPPED_NO_AUDIO", "SKIPPED_NO_SPEECH",
+    )
+    with SessionLocal() as session:
+        # The status predicate makes removal race-safe with the dispatcher: if
+        # it claims a queued row first, the DELETE cannot remove the running job.
+        result = session.execute(delete(Job).where(Job.id == job_id, Job.status.in_(removable_statuses)))
+        if result.rowcount != 1:
+            session.rollback()
+            job = session.get(Job, job_id)
+            if not job:
+                raise HTTPException(404, "job not found")
+            raise HTTPException(409, f"cannot remove job in {job.status}; cancel it and wait until it stops")
+        session.execute(delete(Segment).where(Segment.job_id == job_id))
+        session.execute(delete(StageRun).where(StageRun.job_id == job_id))
+        session.execute(delete(Artifact).where(Artifact.job_id == job_id))
+        session.execute(delete(Event).where(Event.job_id == job_id))
+        session.execute(update(Job).where(Job.parent_job_id == job_id).values(parent_job_id=None))
+        session.execute(update(Upload).where(Upload.completed_job_id == job_id).values(completed_job_id=None))
+        session.commit()
+        return {"deleted": True, "id": job_id, "media_preserved": True}
 
 
 @router.get("/jobs/{job_id}")
@@ -601,29 +713,48 @@ def patch_segments(job_id: str, payload: list[SegmentPatch], _: None = Depends(_
             if result.rowcount != 1:
                 session.rollback()
                 raise HTTPException(409, f"segment {patch.id} changed or draft is no longer editable")
-        job_update = session.execute(update(Job).where(Job.id == job_id, Job.status == "DRAFT", Job.lease_id.is_(None)).values(
-            revision=Job.revision + 1, updated_at=now()))
-        if job_update.rowcount != 1:
+        job_revision = session.scalar(update(Job).where(
+            Job.id == job_id,
+            Job.status == "DRAFT",
+            Job.lease_id.is_(None),
+        ).values(revision=Job.revision + 1, updated_at=now()).returning(Job.revision))
+        if job_revision is None:
             session.rollback()
             raise HTTPException(409, "draft changed or is no longer editable")
         session.commit()
-        return {"revision": session.scalar(select(Job.revision).where(Job.id == job_id))}
+        return {"revision": job_revision}
 
 
 @router.post("/jobs/{job_id}/render")
-def rerender(job_id: str, _: None = Depends(_csrf)):
+def rerender(job_id: str, payload: RenderRequest | None = None, _: None = Depends(_csrf)):
     with SessionLocal() as session:
         # Freeze a draft with a single conditional UPDATE. A stale editor cannot
         # queue a draft after another request has changed or claimed it.
-        frozen = session.execute(update(Job).where(Job.id == job_id, Job.status == "DRAFT", Job.lease_id.is_(None)).values(
-            status="QUEUED", error=None, updated_at=now()))
-        if frozen.rowcount == 1:
+        frozen_count = 0
+        if payload is not None:
+            frozen = session.execute(update(Job).where(
+                Job.id == job_id,
+                Job.status == "DRAFT",
+                Job.lease_id.is_(None),
+                Job.revision == payload.expected_revision,
+            ).values(status="QUEUED", error=None, pause_requested=False, pause_acknowledged=False,
+                     updated_at=now()))
+            frozen_count = frozen.rowcount
+        if frozen_count == 1:
+            session.execute(update(StageRun).where(
+                StageRun.job_id == job_id,
+                StageRun.stage == "review",
+                StageRun.unit_key == "all",
+            ).values(status="COMPLETED", error=None, finished_at=now()))
             session.commit()
             queued = session.get(Job, job_id)
             return _job_dict(session, queued)
         parent = session.get(Job, job_id)
         if not parent: raise HTTPException(404, "job not found")
-        if parent.status == "DRAFT": raise HTTPException(409, "draft changed or is already claimed")
+        if parent.status == "DRAFT":
+            if payload is None:
+                raise HTTPException(422, "expected_revision is required to render a draft")
+            raise HTTPException(409, "draft changed or is already claimed")
         if parent.status not in {"COMPLETED", "COMPLETED_WITH_WARNINGS"} or parent.lease_id is not None:
             raise HTTPException(409, "only a completed, unowned job can be rerendered")
         child = Job(source_id=parent.source_id, original_name=parent.original_name, display_name=parent.display_name,
@@ -725,13 +856,21 @@ def watch_folders():
 
 @router.post("/watch-folders")
 def add_watch_folder(payload: WatchCreate, _: None = Depends(_csrf)):
-    path = Path(payload.path).expanduser().resolve()
+    if payload.input_folder is not None:
+        try: path = folder_path(settings.input_root, payload.input_folder)
+        except ValueError as exc: raise HTTPException(422, str(exc)) from exc
+    elif payload.path:
+        path = Path(payload.path).expanduser().resolve()
+    else:
+        raise HTTPException(422, "choose an input folder")
     if not path.is_dir(): raise HTTPException(422, "watch folder does not exist")
+    try: preset = _normalize_preset(payload.preset)
+    except ValueError as exc: raise HTTPException(422, str(exc)) from exc
     with SessionLocal() as session:
-        folder = WatchFolder(path=str(path), preset_json=json_text(payload.preset)); session.add(folder)
+        folder = WatchFolder(path=str(path), preset_json=json_text(preset)); session.add(folder)
         try: session.commit()
         except Exception: session.rollback(); raise HTTPException(409, "watch folder already exists")
-        return {"id": folder.id, "path": folder.path, "preset": payload.preset, "enabled": True}
+        return {"id": folder.id, "path": folder.path, "preset": preset, "enabled": True}
 
 
 @router.delete("/watch-folders/{folder_id}")
@@ -740,6 +879,34 @@ def remove_watch_folder(folder_id: str, _: None = Depends(_csrf)):
         folder = session.get(WatchFolder, folder_id)
         if not folder: raise HTTPException(404, "watch folder not found")
         session.delete(folder); session.commit(); return {"deleted": True}
+
+
+def _storage_root(scope: str) -> Path:
+    if scope == "input": return settings.input_root
+    if scope == "output": return settings.output_root
+    raise HTTPException(422, "scope must be input or output")
+
+
+@router.get("/storage-folders")
+def storage_folders(scope: str = Query(pattern="^(input|output)$")):
+    root = _storage_root(scope)
+    return {"scope": scope, "root": str(root.resolve()), "folders": list_folders(root)}
+
+
+@router.post("/storage-folders")
+def add_storage_folder(payload: StorageFolderCreate, _: None = Depends(_csrf)):
+    root = _storage_root(payload.scope)
+    if roots_overlap(settings.input_root, settings.output_root):
+        raise HTTPException(409, "input and output roots must be separate")
+    try:
+        item = create_folder(root, payload.parent, payload.name)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    return {"scope": payload.scope, **item}
 
 
 @router.get("/settings")

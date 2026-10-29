@@ -1,4 +1,5 @@
 import { sha256 } from '@noble/hashes/sha256'
+import { isSubtitleStyle, normalizeSubtitleStyle, type SubtitleStyle } from './subtitleStyle'
 
 export const API = '/api/v1'
 export const UPLOAD_SESSIONS_KEY = 'videoauto.upload-sessions.v1'
@@ -7,9 +8,13 @@ export const FINGERPRINT_CHUNK_BYTES = 8 * 1024 * 1024
 export type UploadPreset = {
   audio_mode: string
   subtitle_mode: string
+  subtitle_style?: Partial<SubtitleStyle>
   include_dubbing: boolean
   include_original_track?: boolean
+  review_before_render?: boolean
   priority?: number
+  input_folder?: string
+  output_folder?: string
 }
 
 export type UploadSession = {
@@ -71,9 +76,13 @@ export function presetKey(preset: UploadPreset) {
   return JSON.stringify({
     audio_mode: preset.audio_mode,
     subtitle_mode: preset.subtitle_mode,
+    subtitle_style: normalizeSubtitleStyle(preset.subtitle_style),
     include_dubbing: Boolean(preset.include_dubbing),
     include_original_track: Boolean(preset.include_original_track),
+    review_before_render: Boolean(preset.review_before_render),
     priority: Number.isSafeInteger(preset.priority) ? preset.priority : 0,
+    input_folder: normalizeFolder(preset.input_folder),
+    output_folder: normalizeFolder(preset.output_folder),
   })
 }
 
@@ -81,6 +90,19 @@ const uploadIdPattern = /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{
 const sha256Pattern = /^[0-9a-f]{64}$/i
 const knownAudioModes = new Set(['replace', 'mix'])
 const knownSubtitleModes = new Set(['burn', 'soft', 'srt', 'none'])
+
+function normalizeFolder(value: unknown) {
+  return typeof value === 'string' ? value.replaceAll('\\', '/').replace(/^\/+|\/+$/g, '') : ''
+}
+
+function isFolder(value: unknown) {
+  if (typeof value !== 'string' || value.length > 240) return false
+  const normalized = normalizeFolder(value)
+  if (!normalized) return value === ''
+  const reserved = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i
+  return normalized.split('/').every(part => Boolean(part) && part !== '.' && part !== '..' &&
+    !/[<>:"|?*\u0000-\u001f]/.test(part) && !/[ .]$/.test(part) && !reserved.test(part))
+}
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -116,7 +138,11 @@ export function isUploadSession(value: unknown): value is UploadSession {
   for (const key of ['include_original_track', 'include_original_audio', 'include_original_audio_track', 'original_audio_secondary']) {
     if (key in preset && typeof preset[key] !== 'boolean') return false
   }
+  if ('review_before_render' in preset && typeof preset.review_before_render !== 'boolean') return false
+  if ('subtitle_style' in preset && !isSubtitleStyle(preset.subtitle_style)) return false
   if ('priority' in preset && (!Number.isSafeInteger(preset.priority) || typeof preset.priority !== 'number')) return false
+  if ('input_folder' in preset && !isFolder(preset.input_folder)) return false
+  if ('output_folder' in preset && !isFolder(preset.output_folder)) return false
   if (typeof createdAt !== 'string' || Number.isNaN(Date.parse(createdAt))) return false
   if ('finalizationPending' in value && typeof value.finalizationPending !== 'boolean') return false
   return true

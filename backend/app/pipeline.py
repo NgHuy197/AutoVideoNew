@@ -16,6 +16,7 @@ from .config import settings
 from .db import Artifact, Event, Job, Segment, SessionLocal, Source, StageRun, json_text, now
 from .media import MediaError, extract_audio, run_command, sha256_file, validate_video
 from .renderer import build_voice_track, render_video
+from .storage_folders import folder_path
 from .translate import NLLBTranslator
 from .tts import PiperSynthesizer, fit_to_slot
 
@@ -192,10 +193,12 @@ class Pipeline:
         config = job.config
         config.setdefault("audio_mode", job.mode.get("audio_mode", "replace"))
         config.setdefault("subtitle_mode", job.mode.get("subtitle_mode", "burn"))
+        config.setdefault("subtitle_style", job.mode.get("subtitle_style"))
         config.setdefault("source_language", job.mode.get("source_language"))
         # Missing config means the container's default disposition, including
         # legacy jobs created before audio_index was persisted.
         config.setdefault("audio_index", job.mode.get("audio_index"))
+        config.setdefault("review_before_render", job.mode.get("review_before_render", False))
         return config
 
     def _clear_stage_deadline(self, session) -> None:
@@ -417,30 +420,69 @@ class Pipeline:
             self._ensure_owned()
 
             segments = list(session.scalars(select(Segment).where(Segment.job_id == self.job_id).order_by(Segment.ordinal)))
+            review_run = session.scalar(select(StageRun).where(
+                StageRun.job_id == self.job_id,
+                StageRun.stage == "review",
+                StageRun.unit_key == "all",
+            )) if config.get("review_before_render") else None
+            review_approved = bool(review_run and review_run.status == "COMPLETED")
             language = config.get("source_language") or detected_language or "en"
             self._stage(session, "translation"); self._progress(session, "translation", 42, "NLLB local đang dịch sang tiếng Việt")
-            if language.lower() in {"vi", "vie", "vie_latn"}:
+            if not review_approved:
+                if language.lower() in {"vi", "vie", "vie_latn"}:
+                    for item in segments:
+                        if not item.translated_text: item.translated_text = item.source_text
+                elif not all(x.translated_text for x in segments):
+                    if not settings.nllb_model: raise MediaError("NLLB model path is not configured")
+                    # Loading tokenizer/weights is outside each bounded inference
+                    # deadline.  Once loaded, every batch gets a fresh 300s stage
+                    # deadline immediately before ``translate_batch``.
+                    self._clear_stage_deadline(session)
+                    translator = NLLBTranslator(settings.nllb_model, threads=settings.cpu_threads)
+                    self._translate_segments_in_batches(session, segments, translator, language)
                 for item in segments:
-                    if not item.translated_text: item.translated_text = item.source_text
-            elif not all(x.translated_text for x in segments):
-                if not settings.nllb_model: raise MediaError("NLLB model path is not configured")
-                # Loading tokenizer/weights is outside each bounded inference
-                # deadline.  Once loaded, every batch gets a fresh 300s stage
-                # deadline immediately before ``translate_batch``.
-                self._clear_stage_deadline(session)
-                translator = NLLBTranslator(settings.nllb_model, threads=settings.cpu_threads)
-                self._translate_segments_in_batches(session, segments, translator, language)
-            for item in segments:
-                if not item.reading_text: item.reading_text = item.translated_text
+                    if not item.reading_text: item.reading_text = item.translated_text
             self._lease_guard(session); session.commit(); self._stage(session, "translation", "COMPLETED"); self._progress(session, "translation", 58)
             self._ensure_owned()
 
+            if config.get("review_before_render"):
+                if not review_approved:
+                    if review_run is None:
+                        review_run = StageRun(job_id=self.job_id, stage="review", unit_key="all", status="WAITING")
+                        session.add(review_run)
+                    else:
+                        review_run.status = "WAITING"
+                        review_run.error = None
+                        review_run.finished_at = None
+                    predicates = [Job.id == self.job_id, Job.status == "RUNNING",
+                                  Job.pause_requested.is_(False), Job.cancel_requested.is_(False)]
+                    if self.lease_id:
+                        predicates.append(Job.lease_id == self.lease_id)
+                    stopped = session.execute(update(Job).where(*predicates).values(
+                        status="DRAFT", stage="review", progress=58,
+                        lease_id=None, lease_at=None, stage_deadline_at=None,
+                        worker_pid=None, worker_started_at=None, updated_at=now()))
+                    if stopped.rowcount != 1:
+                        session.rollback()
+                        self._ensure_owned()
+                        raise LeaseLost()
+                    session.add(Event(job_id=self.job_id, kind="review_required",
+                                      payload_json=json_text({"stage": "review"})))
+                    session.commit()
+                    return
+
             include_dubbing = bool(config.get("include_dubbing", True))
-            if include_dubbing:
+            spoken_segments = [item for item in segments if item.reading_text.strip()]
+            for item in segments:
+                if not item.reading_text.strip():
+                    item.tts_path = None
+                    item.tts_duration_ms = None
+                    item.tempo = None
+            if include_dubbing and spoken_segments:
                 if not settings.piper_model: raise MediaError("Piper model path is not configured")
                 synthesizer = PiperSynthesizer(settings.piper_model, settings.piper_config if settings.piper_config and settings.piper_config.exists() else None,
                                                threads=settings.cpu_threads)
-                for index, item in enumerate(segments):
+                for index, item in enumerate(spoken_segments):
                     self._ensure_owned()
                     unit_key = f"segment:{item.ordinal}"
                     self._stage(session, "tts", "RUNNING", unit_key=unit_key)
@@ -457,24 +499,26 @@ class Pipeline:
                     self._stage(session, "tts", "COMPLETED", unit_key=unit_key)
                     # Commit a checkpoint after each sentence so a crash loses
                     # at most one local TTS unit and the queue can resume.
-                    self._progress(session, "tts", 60 + 15 * (index + 1) / len(segments))
+                    self._progress(session, "tts", 60 + 15 * (index + 1) / len(spoken_segments))
             self._lease_guard(session); session.commit(); self._stage(session, "tts", "COMPLETED"); self._progress(session, "tts", 75)
             self._ensure_owned()
 
             self._stage(session, "render"); self._progress(session, "render", 78, "Đang ghép audio và phụ đề")
             self._ensure_owned()
-            voice_track = build_voice_track(segments, duration_ms, job_dir / "voice-track.wav") if include_dubbing else None
+            voice_track = build_voice_track(spoken_segments, duration_ms, job_dir / "voice-track.wav") if include_dubbing else None
             # Sources are content-addressed and can be shared by uploads with
             # different filenames. Use the immutable job name for output
             # presentation and collision-free stems.
             stem = Path(job.display_name or job.original_name or source.original_name).stem[:100]
-            output_dir = settings.output_root / stem; output_dir.mkdir(parents=True, exist_ok=True)
+            category_dir = folder_path(settings.output_root, config.get("output_folder", ""))
+            output_dir = category_dir / stem; output_dir.mkdir(parents=True, exist_ok=True)
             lease_suffix = (self.lease_id or "manual")[-8:]
             output = output_dir / f"{stem}.vi.{self.job_id[:8]}.{lease_suffix}.mp4"
             result = render_video(source_path, voice_track, segments, duration_ms, output,
                                   audio_mode=config.get("audio_mode", "replace") if include_dubbing else "original", subtitle_mode=config.get("subtitle_mode", "burn"),
                                   audio_index=selected_audio_index, width=int(media["video"].get("width") or 1920), height=int(media["video"].get("height") or 1080),
-                                  include_original_track=bool(config.get("include_original_track", False)))
+                                  include_original_track=bool(config.get("include_original_track", False)),
+                                  subtitle_style=config.get("subtitle_style"))
             try:
                 self._ensure_owned()
             except LeaseLost:
