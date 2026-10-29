@@ -520,6 +520,14 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
     {backgroundItems.map(item => <button className="background-cancel" key={item.key} onClick={() => cancelItem(item)} aria-label={`Hủy tải ${item.file.name}`}>Hủy {item.file.name}</button>)}
   </div>
 
+  const advancedSummary = [
+    `Input: ${inputFolder || 'thư mục gốc'}`,
+    `Output: ${outputFolder || 'thư mục gốc'}`,
+    originalTrack && 'giữ track gốc',
+    reviewBeforeRender && 'duyệt script',
+    priority !== 0 && `ưu tiên ${priority}`,
+  ].filter(Boolean).join(' · ')
+
   return <div className="upload-area">
     <div className="upload-controls">
       <input ref={input} type="file" accept="video/*,.mkv" multiple hidden onChange={event => void handleFiles(event.target.files)} />
@@ -527,23 +535,30 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
       <label>Audio<select value={audioMode} onChange={event => setAudioMode(event.target.value)}><option value="replace">Thay audio gốc</option><option value="mix">Trộn audio gốc −18 dB</option></select></label>
       <label>Phụ đề<select value={subtitleMode} onChange={event => setSubtitleMode(event.target.value)}><option value="burn">Ghi vào hình</option><option value="soft">Track bật/tắt</option><option value="srt">SRT rời</option><option value="none">Không phụ đề</option></select></label>
       <label className="check-label"><input type="checkbox" checked={dub} onChange={event => setDub(event.target.checked)} /> Lồng tiếng</label>
-      <label className="check-label"><input type="checkbox" checked={originalTrack} onChange={event => setOriginalTrack(event.target.checked)} /> Giữ track gốc phụ</label>
-      <label className="check-label"><input type="checkbox" checked={reviewBeforeRender} onChange={event => setReviewBeforeRender(event.target.checked)} /> Duyệt script trước khi ghép</label>
-      <label>Ưu tiên<input className="priority-input" type="number" min="-100" max="100" step="1" value={priority} onChange={event => setPriority(Number.parseInt(event.target.value, 10) || 0)} /></label>
       <button className="primary upload" onClick={() => input.current?.click()}><UploadCloud size={18} /> Thêm video</button>
     </div>
-    <div className="preset-controls" aria-label="Quản lý preset">
-      <input value={presetName} maxLength={160} onChange={event => setPresetName(event.target.value)} placeholder="Tên preset" aria-label="Tên preset" />
-      <button className="secondary" disabled={presetBusy} onClick={() => void savePreset(false)}>Lưu mới</button>
-      <button className="secondary" disabled={presetBusy || !selectedPresetId} onClick={() => void savePreset(true)}>Cập nhật</button>
-      <button className="text-danger" disabled={presetBusy || !selectedPresetId} onClick={() => void deletePreset()}>Xóa preset</button>
-    </div>
-    <div className="storage-folder-selectors">
-      <FolderPicker scope="input" label="Lưu bản gốc vào input" value={inputFolder} onChange={setInputFolder} onError={onError}/>
-      <FolderPicker scope="output" label="Xuất kết quả vào output" value={outputFolder} onChange={setOutputFolder} onError={onError}/>
-    </div>
-    <SubtitleStyleEditor value={subtitleStyle} onChange={setSubtitleStyle} mode={subtitleMode} />
-    <p className="upload-help">Tối đa 2 video tải song song. Nếu trình duyệt bị reload, hãy chọn lại đúng tệp; ứng dụng chỉ tiếp tục khi nhận diện nội dung và preset trùng khớp. Tiến độ tính theo khối máy chủ đã xác nhận.</p>
+    <details className="upload-advanced">
+      <summary>Tùy chọn nâng cao <span>{advancedSummary}</span></summary>
+      <div className="upload-advanced-body">
+        <div className="upload-controls">
+          <label className="check-label"><input type="checkbox" checked={originalTrack} onChange={event => setOriginalTrack(event.target.checked)} /> Giữ track gốc phụ</label>
+          <label className="check-label"><input type="checkbox" checked={reviewBeforeRender} onChange={event => setReviewBeforeRender(event.target.checked)} /> Duyệt script trước khi ghép</label>
+          <label>Ưu tiên<input className="priority-input" type="number" min="-100" max="100" step="1" value={priority} onChange={event => setPriority(Number.parseInt(event.target.value, 10) || 0)} /></label>
+        </div>
+        <div className="preset-controls" aria-label="Quản lý preset">
+          <input value={presetName} maxLength={160} onChange={event => setPresetName(event.target.value)} placeholder="Tên preset" aria-label="Tên preset" />
+          <button className="secondary" disabled={presetBusy} onClick={() => void savePreset(false)}>Lưu mới</button>
+          <button className="secondary" disabled={presetBusy || !selectedPresetId} onClick={() => void savePreset(true)}>Cập nhật</button>
+          <button className="text-danger" disabled={presetBusy || !selectedPresetId} onClick={() => void deletePreset()}>Xóa preset</button>
+        </div>
+        <div className="storage-folder-selectors">
+          <FolderPicker scope="input" label="Lưu bản gốc vào input" value={inputFolder} onChange={setInputFolder} onError={onError}/>
+          <FolderPicker scope="output" label="Xuất kết quả vào output" value={outputFolder} onChange={setOutputFolder} onError={onError}/>
+        </div>
+        <SubtitleStyleEditor value={subtitleStyle} onChange={setSubtitleStyle} mode={subtitleMode} />
+      </div>
+    </details>
+    <p className="upload-help">Có thể chọn nhiều video cùng lúc. Nếu trang bị tải lại khi đang upload, chọn lại đúng tệp đó để tải tiếp.</p>
     {sessions.length > 0 && <div className="resume-hint" role="status"><RotateCcw size={14} /><span><strong>{sessions.length} phiên upload dở được lưu trên máy.</strong> Đặt đúng preset bên trên rồi chọn lại tệp để tiếp tục.</span></div>}
     {items.length > 0 && <div className="upload-items" aria-live="polite" aria-label="Tiến độ tải video">
       {items.map(item => {
@@ -551,7 +566,7 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
         return <div className="upload-item" key={item.key}>
           <div className="upload-item-head"><div className="upload-item-name" title={item.file.name}>{item.file.name}</div><span className={`upload-item-status ${item.status}`}>{item.status === 'uploading' && <LoaderCircle size={13} className="spin" />}{item.status === 'completed' && <Check size={13} />}{item.status === 'error' && <CircleAlert size={13} />}{statusLabel(item)}</span></div>
           <div className="upload-progress" role="progressbar" aria-label={`Tiến độ ${item.file.name}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><i style={{ width: `${progress}%` }} /></div>
-          {item.status === 'uploading' && <div className="upload-percent">{progress}% · khối đã xác nhận, không tính thời gian chờ</div>}
+          {item.status === 'uploading' && <div className="upload-percent">{progress}%</div>}
           {item.note && <div className="upload-note">{item.note}</div>}
           {item.error && <div className="upload-error"><CircleAlert size={13} />{item.error}<button className="upload-retry" onClick={() => retry(item)}><RotateCcw size={13} /> Thử lại</button></div>}
           {item.status !== 'completed' && item.status !== 'error' && item.status !== 'cancelled' && <button className="upload-cancel" onClick={() => cancelItem(item)}><X size={13} /> Hủy tải lên</button>}

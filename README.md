@@ -20,6 +20,12 @@ mục runtime do Video Auto quản lý. Sau đó script tạo/cập nhật SQLit
 manifest hash đầy đủ.
 Nếu một asset bắt buộc chưa có, setup dừng với đường dẫn cần bổ sung.
 
+Chạy setup từ PowerShell thường, không từ terminal bên trong ứng dụng Store/MSIX
+(Claude, Codex…). Windows chuyển hướng ghi vào `%LOCALAPPDATA%` của các ứng
+dụng đó sang thư mục riêng của chúng, nên dữ liệu và model sẽ biến mất nếu gỡ
+ứng dụng. Máy này dùng `VIDEOAUTO_DATA_ROOT=C:\Users\PC\VideoAuto` trong
+`.runtime\videoauto.env` để tránh việc đó.
+
 ## Chạy ứng dụng
 
 ```powershell
