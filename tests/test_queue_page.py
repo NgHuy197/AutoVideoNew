@@ -125,3 +125,41 @@ def test_watch_reuses_job_from_web_upload_with_other_preset(queue_db, tmp_path, 
     assert reused.id == uploaded_id
     with sessions() as session:
         assert len(list(session.scalars(select(Job)))) == 1
+
+
+def test_output_folder_list_hides_per_video_export_folders(tmp_path):
+    from backend.app.storage_folders import list_folders
+    (tmp_path / "Khach hang" / "clip").mkdir(parents=True)
+    (tmp_path / "Khach hang" / "clip" / "clip.vi.12345678.abcdef12.mp4").write_bytes(b"x")
+    (tmp_path / "Download").mkdir()
+    (tmp_path / "Download" / "Download.vi.12345678.manual.mp4").write_bytes(b"x")
+    (tmp_path / "Empty group").mkdir()
+
+    output = [row["relative"] for row in list_folders(tmp_path, skip_exports=True)]
+    every = [row["relative"] for row in list_folders(tmp_path)]
+
+    assert output == ["", "Empty group", "Khach hang"]
+    assert "Download" in every and "Khach hang/clip" in every
+
+
+def test_reaper_keeps_pipeline_failure_reason(queue_db, monkeypatch):
+    from types import SimpleNamespace
+    from backend.app import service
+    sessions, source_id = queue_db
+    job_id = _add_job(sessions, source_id, "FAILED")
+    crashed_id = _add_job(sessions, source_id, "RUNNING")
+    with sessions() as session:
+        job = session.get(Job, job_id); job.error = "Whisper model is missing"; job.retry_count = 2
+        session.get(Job, crashed_id).retry_count = 2
+        session.commit()
+    monkeypatch.setattr(service, "SessionLocal", sessions)
+    monkeypatch.setattr(service, "close_owned", lambda child: None)
+    queue = service.QueueSupervisor()
+    for owner in (job_id, crashed_id):
+        queue._children[owner] = SimpleNamespace(process=SimpleNamespace(returncode=0, poll=lambda: 0))
+
+    queue._reap()
+
+    with sessions() as session:
+        assert session.get(Job, job_id).error == "Whisper model is missing"
+        assert "dừng đột ngột (mã 0)" in session.get(Job, crashed_id).error

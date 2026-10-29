@@ -417,10 +417,16 @@ class QueueSupervisor:
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
                 if job and job.status in {"RUNNING", "FAILED"}:
-                    if job.retry_count < len(settings.retry_delays):
-                        delay = settings.retry_delays[job.retry_count]; job.retry_count += 1; job.status = "QUEUED"; job.retry_after = now() + timedelta(seconds=delay); job.error = f"worker exited ({returncode}); retry scheduled"
+                    # A worker that recorded FAILED itself exits cleanly; keep its
+                    # real cause instead of replacing it with the exit code.
+                    if job.status == "FAILED" and job.error:
+                        reason = job.error
                     else:
-                        job.status = "FAILED"; job.error = f"worker exited with code {returncode}"
+                        reason = f"Tiến trình xử lý dừng đột ngột (mã {returncode}). Xem logs/worker để biết chi tiết."
+                    if job.retry_count < len(settings.retry_delays):
+                        delay = settings.retry_delays[job.retry_count]; job.retry_count += 1; job.status = "QUEUED"; job.retry_after = now() + timedelta(seconds=delay); job.error = f"{reason} Sẽ tự thử lại sau {delay} giây."
+                    else:
+                        job.status = "FAILED"; job.error = reason
                     job.lease_id = None; job.lease_at = None; job.worker_pid = None; job.worker_started_at = None; job.stage_deadline_at = None; session.commit()
                 elif job and job.status in {"CANCELLING", "CANCELLED"}:
                     job.status = "CANCELLED"; job.lease_id = None; job.lease_at = None; job.worker_pid = None; job.worker_started_at = None; job.stage_deadline_at = None; session.commit()

@@ -47,7 +47,7 @@ export default function SubtitleStyleEditor({ value, onChange, mode }: Props) {
     textShadow: value.shadow ? `${value.shadow / (10.8 * aspect)}cqw ${value.shadow / (10.8 * aspect)}cqw 0 #0008` : 'none',
   }
   const numeric = (key: 'outline_width' | 'shadow' | 'margin_v' | 'margin_h' | 'max_chars' | 'max_lines', label: string, min: number, max: number, step: number) =>
-    <label>{label}<input type="number" min={min} max={max} step={step} value={value[key]} onChange={event => {
+    <label>{label}<input type="number" min={min} max={max} step={step} value={Math.round(value[key] * 100) / 100} onChange={event => {
       const number = event.currentTarget.valueAsNumber
       if (Number.isFinite(number)) change(key, Math.min(max, Math.max(min, step === 1 ? Math.round(number) : number)))
     }} /></label>

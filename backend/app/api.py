@@ -890,7 +890,7 @@ def _storage_root(scope: str) -> Path:
 @router.get("/storage-folders")
 def storage_folders(scope: str = Query(pattern="^(input|output)$")):
     root = _storage_root(scope)
-    return {"scope": scope, "root": str(root.resolve()), "folders": list_folders(root)}
+    return {"scope": scope, "root": str(root.resolve()), "folders": list_folders(root, skip_exports=scope == "output")}
 
 
 @router.post("/storage-folders")

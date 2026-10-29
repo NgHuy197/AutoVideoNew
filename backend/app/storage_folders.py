@@ -43,7 +43,15 @@ def folder_path(root: Path, relative: object = "") -> Path:
     return confined(target, root)
 
 
-def list_folders(root: Path, limit: int = 500) -> list[dict[str, str]]:
+def _is_export_dir(path: Path) -> bool:
+    """Pipeline output lands in ``<category>/<stem>/<stem>.vi.<job>.<lease>.mp4``."""
+    try:
+        return any(item.is_file() and item.name.startswith(f"{path.name}.vi.") for item in path.iterdir())
+    except OSError:
+        return False
+
+
+def list_folders(root: Path, limit: int = 500, *, skip_exports: bool = False) -> list[dict[str, str]]:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     rows = [{"relative": "", "path": str(root), "name": "Thư mục gốc"}]
@@ -56,6 +64,9 @@ def list_folders(root: Path, limit: int = 500) -> list[dict[str, str]]:
         except OSError:
             continue
         for child in children:
+            # Per-video export folders are results, not categories to choose.
+            if skip_exports and _is_export_dir(child):
+                continue
             try:
                 relative = child.resolve().relative_to(root).as_posix()
             except (OSError, ValueError):
