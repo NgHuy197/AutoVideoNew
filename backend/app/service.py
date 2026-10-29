@@ -29,6 +29,7 @@ class QueueSupervisor:
         self._last_maintenance = 0.0
         self._last_tick = time.monotonic()
         self._last_resource_state: tuple[bool, str] | None = None
+        self._resources_short = False
         self._last_error: dict[str, float] = {}
         # The inhibitor is deliberately owned by the supervisor thread. It is
         # refreshed there so it never leaks a power request after shutdown.
@@ -259,20 +260,26 @@ class QueueSupervisor:
 
     def _resource_state(self) -> tuple[bool, str, dict[str, int | float]]:
         """Check every filesystem used by an active job plus available RAM."""
+        # While short, require the reserve plus a margin before resuming.
+        disk_reserve = settings.min_free_bytes + (settings.disk_recovery_margin_bytes if self._resources_short else 0)
+        ram_reserve = settings.min_available_ram_bytes + (settings.ram_recovery_margin_bytes if self._resources_short else 0)
         try:
             roots = (settings.data_root, settings.input_root, settings.output_root)
             snapshots = [resource_snapshot(root) for root in roots]
             disk_free = min(int(item["disk_free_bytes"]) for item in snapshots)
-            if disk_free < settings.min_free_bytes:
-                return False, f"disk free {disk_free} bytes is below reserve {settings.min_free_bytes}", {
+            if disk_free < disk_reserve:
+                self._resources_short = True
+                return False, f"disk free {disk_free} bytes is below reserve {disk_reserve}", {
                     "disk_free_bytes": disk_free, "ram_available_bytes": min(int(item.get("ram_available_bytes", -1)) for item in snapshots),
                 }
             ram_values = [int(item.get("ram_available_bytes", -1)) for item in snapshots if int(item.get("ram_available_bytes", -1)) >= 0]
-            if ram_values and min(ram_values) < settings.min_available_ram_bytes:
+            if ram_values and min(ram_values) < ram_reserve:
+                self._resources_short = True
                 available = min(ram_values)
-                return False, f"RAM available {available} bytes is below reserve {settings.min_available_ram_bytes}", {
+                return False, f"RAM available {available} bytes is below reserve {ram_reserve}", {
                     "disk_free_bytes": disk_free, "ram_available_bytes": available,
                 }
+            self._resources_short = False
             return True, "ready", {"disk_free_bytes": disk_free, "ram_available_bytes": min(ram_values) if ram_values else -1}
         except (OSError, ValueError, TypeError) as exc:
             return False, f"resource check failed: {exc}", {"disk_free_bytes": -1, "ram_available_bytes": -1}
@@ -302,7 +309,9 @@ class QueueSupervisor:
             try:
                 self._background_steps()
                 ready, reason, snapshot = self._resource_state()
-                state = (ready, reason)
+                # Log transitions only; the reason embeds live byte counts that
+                # change every tick, so compare its leading resource kind.
+                state = (ready, reason.split(" ", 1)[0])
                 if state != self._last_resource_state:
                     self._last_resource_state = state
                     self._record_resource_state(ready, reason, snapshot)

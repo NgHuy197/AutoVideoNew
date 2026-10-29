@@ -43,6 +43,10 @@ class AppSettings:
     max_concurrent_jobs: int = 1
     min_free_bytes: int = 20 * 1024 * 1024 * 1024
     min_available_ram_bytes: int = 4 * 1024 * 1024 * 1024
+    # After a shortage, resume only once usage is this far above the reserve so
+    # the queue does not flap while memory hovers around the threshold.
+    ram_recovery_margin_bytes: int = 512 * 1024 * 1024
+    disk_recovery_margin_bytes: int = 1024 * 1024 * 1024
     retry_delays: tuple[int, ...] = (30, 120)
     backup_retention_days: int = 7
     partial_upload_retention_hours: int = 24

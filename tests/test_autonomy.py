@@ -150,3 +150,22 @@ def test_legacy_watch_schema_upgrades_without_losing_markers(tmp_path, monkeypat
     with engine.connect() as conn:
         assert conn.execute(text("SELECT path,preset_hash FROM watch_seen")).all() == [("source.mp4", "")]
     engine.dispose()
+
+
+def test_resource_readiness_has_recovery_margin(monkeypatch):
+    gib = 1024 ** 3
+    ram = {"value": 0}
+    monkeypatch.setattr(service, "resource_snapshot", lambda root: {
+        "disk_free_bytes": 500 * gib, "ram_available_bytes": ram["value"]})
+    monkeypatch.setattr(service.settings, "min_free_bytes", 20 * gib)
+    monkeypatch.setattr(service.settings, "min_available_ram_bytes", 4 * gib)
+    monkeypatch.setattr(service.settings, "ram_recovery_margin_bytes", gib // 2)
+    queue = service.QueueSupervisor()
+
+    states = []
+    for value in (5 * gib, int(3.9 * gib), int(4.1 * gib), int(4.4 * gib), int(4.6 * gib), int(4.1 * gib)):
+        ram["value"] = value
+        states.append(queue._resource_state()[0])
+
+    # Below 4 GiB stops; recovery needs 4.5 GiB; once ready, 4.1 GiB is enough.
+    assert states == [True, False, False, False, True, True]
