@@ -4,9 +4,10 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from backend.app import api, pipeline, renderer
-from backend.app.db import Job
+from backend.app.db import Job, Segment
 from backend.app.subtitles import caption_cues
 from tests.test_script_review import _mock_pipeline_media, review_db  # noqa: F401
 
@@ -165,3 +166,45 @@ def test_pipeline_fails_clearly_without_dutch_voice(review_db, monkeypatch):
     with sessions() as session:
         job = session.get(Job, job_id)
         assert job.status == "FAILED" and "tiếng Hà Lan" in job.error
+
+def _prepare_short_speech(sessions, job_id: str, *, text: str, end_ms: int) -> None:
+    api.rerender(job_id, api.RenderRequest(expected_revision=1))
+    with sessions() as session:
+        job = session.get(Job, job_id)
+        job.status = "RUNNING"; job.lease_id = "dub-lease"; job.lease_at = pipeline.now()
+        segment = session.scalars(select(Segment).where(Segment.job_id == job_id)).one()
+        segment.reading_text = text; segment.translated_text = text; segment.end_ms = end_ms
+        session.commit()
+
+
+def _media_seconds(monkeypatch, seconds: float) -> None:
+    monkeypatch.setattr(pipeline, "validate_video", lambda _path: {
+        "duration": seconds, "audio": [{"start_time": 0}], "video": {"width": 1280, "height": 720}})
+
+
+def test_lone_interjection_keeps_original_audio(review_db, monkeypatch):
+    sessions, job_id, _, tmp_path = review_db
+    _prepare_short_speech(sessions, job_id, text="Ô oh", end_ms=900)
+    calls: list[str] = []
+    _mock_pipeline_media(monkeypatch, tmp_path, calls)
+    _media_seconds(monkeypatch, 43.0)
+    seen: dict = {}
+    monkeypatch.setattr(pipeline, "render_video", lambda *_args, **kwargs: seen.update(kwargs) or {})
+
+    pipeline.Pipeline(job_id, "dub-lease").run()
+
+    assert seen["audio_mode"] == "original"
+    assert "build_voice" not in calls and "tts:synthesize" not in calls
+
+
+def test_short_clip_of_real_speech_is_still_dubbed(review_db, monkeypatch):
+    sessions, job_id, _, tmp_path = review_db
+    _prepare_short_speech(sessions, job_id, text="Xin chào", end_ms=900)
+    calls: list[str] = []
+    _mock_pipeline_media(monkeypatch, tmp_path, calls)
+    seen: dict = {}
+    monkeypatch.setattr(pipeline, "render_video", lambda *_args, **kwargs: seen.update(kwargs) or {})
+
+    pipeline.Pipeline(job_id, "dub-lease").run()
+
+    assert seen["audio_mode"] == "replace" and "build_voice" in calls

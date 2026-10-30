@@ -131,6 +131,10 @@ def _normalize_chunk_segments(session, job_id: str, duration_ms: int, chunk_ms: 
         previous_raw_end = old_end
 
 
+MIN_DUB_WORDS = 4
+MIN_DUB_COVERAGE = 0.15
+
+
 def _load_nllb() -> NLLBTranslator:
     if not settings.nllb_model: raise MediaError("NLLB model path is not configured")
     return NLLBTranslator(settings.nllb_model, threads=settings.cpu_threads)
@@ -503,8 +507,12 @@ class Pipeline:
 
             include_dubbing = bool(config.get("include_dubbing", True))
             spoken_segments = [item for item in segments if item.reading_text.strip()]
-            # A clip with only sound effects keeps its own audio.
-            include_dubbing = include_dubbing and bool(spoken_segments)
+            # A clip that is nearly all sound effects keeps its own audio: one
+            # "Ooh" must not replace everything else with silence.
+            spoken_words = sum(len(item.reading_text.split()) for item in spoken_segments)
+            spoken_ms = sum(item.end_ms - item.start_ms for item in spoken_segments)
+            if spoken_words < MIN_DUB_WORDS and spoken_ms < duration_ms * MIN_DUB_COVERAGE:
+                include_dubbing = False
             for item in segments:
                 if not item.reading_text.strip():
                     item.tts_path = None

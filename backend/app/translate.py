@@ -102,10 +102,27 @@ Quy tắc:
 _NUMBERED_LINE = re.compile(r"^\s*(\d+)[.)]\s*(.+?)\s*$", re.M)
 # Qwen occasionally slips into Chinese mid-sentence; Vietnamese never uses these.
 _FOREIGN_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0400-\u04ff\u0e00-\u0e7f]")
-# Lowercase English that slipped through. Vietnamese has no such endings, and
-# capitalized names stay allowed.
-_ENGLISH_LEAK = re.compile(r"(?<![\w-])(?:[a-z]{2,}(?:ing|tion|ness|ed)|the|and|with|that|this|was|were)(?![\w-])")
+# Every Vietnamese syllable fits onset + vowels + coda. Lowercase ASCII words
+# that do not are untranslated foreign words; capitalized names stay allowed.
+_VIETNAMESE_SYLLABLE = re.compile(
+    r"(?:b|ch?|d|gh?|gi|h|kh?|l|m|ngh?|nh?|ph?|qu|r|s|th?|tr|v|x)?"
+    r"[aeiouy]{1,3}(?:ch|c|m|ng?|nh|p|t)?")
+_COMMON_ENGLISH = {"the", "and", "with", "that", "this", "was", "were", "for", "his", "her", "him", "she", "you"}
+# Loanwords normal in Vietnamese text, which the syllable shape would reject.
+_LOANWORDS = {"album", "axit", "bar", "blog", "boxing", "bunker", "burger", "camera", "email", "feet", "film", "game",
+              "gas", "gel", "golf", "guitar", "internet", "laptop", "logic", "marketing", "online", "oxy", "piano",
+              "pizza", "play", "radio", "robot", "show", "silicone", "snap", "soda", "spam", "taxi", "tennis", "vali",
+              "video", "virus", "vitamin", "web", "website", "wifi"}
 CONTEXT_LINES = 5
+RETRY_HINT = "Lưu ý: lần trước còn sót từ không phải tiếng Việt. Mọi từ đều phải dịch sang tiếng Việt.\n"
+MAX_WORD_REPLY = 4
+
+
+def _leaked_words(translation: str) -> set[str]:
+    """Lowercase words that cannot be Vietnamese, so were left untranslated."""
+    words = set(re.findall(r"(?<![\w-])[a-z]{3,}(?![\w-])", translation))
+    return {word for word in words if word not in _LOANWORDS
+            and (word in _COMMON_ENGLISH or not _VIETNAMESE_SYLLABLE.fullmatch(word))}
 
 
 def _opener():
@@ -162,25 +179,44 @@ class OllamaTranslator:
         self._fallback: NLLBTranslator | None = None
         self._recent: list[str] = []
 
-    def _chat(self, prompt: str, timeout_seconds: float) -> str:
+    def _chat(self, prompt: str, timeout_seconds: float, temperature: float = 0.2) -> str:
         body = json.dumps({"model": self.model, "stream": False, "keep_alive": "2m",
-                           "options": {"temperature": 0.2, "num_ctx": 8192},
+                           "options": {"temperature": temperature, "num_ctx": 8192},
                            "messages": [{"role": "system", "content": LLM_SYSTEM_PROMPT},
                                         {"role": "user", "content": prompt}]}).encode("utf-8")
         request = Request(f"{OLLAMA_URL}/api/chat", body, {"Content-Type": "application/json"})
         with _opener().open(request, timeout=timeout_seconds) as response:
             return str(json.load(response)["message"]["content"])
 
-    def _attempt(self, texts: list[str], timeout_seconds: float) -> dict[int, str]:
+    def _nllb(self) -> NLLBTranslator:
+        if self._fallback is None: self._fallback = self._load_fallback()
+        return self._fallback
+
+    def _repair(self, translation: str, source_code: str, timeout_seconds: float | None) -> tuple[str, str | None]:
+        """Replace leaked words through NLLB, keeping an otherwise good sentence.
+
+        Retrying the line repeats the leak whatever the prompt, and asking this
+        model for a word's meaning returns Chinese. One word that stays English
+        must not cost the sentence its context, so that case only warns.
+        """
+        for word in sorted(_leaked_words(translation)):
+            reply = self._nllb().translate_batch([word], source_code, timeout_seconds=timeout_seconds)[0].text
+            reply = reply.strip().strip('".,;:!?').lower()
+            if reply and len(reply.split()) <= MAX_WORD_REPLY and not _FOREIGN_SCRIPT.search(reply) and not _leaked_words(reply):
+                translation = re.sub(rf"\b{re.escape(word)}\b", reply, translation)
+        return translation, "Còn từ chưa dịch trong câu này" if _leaked_words(translation) else None
+
+    def _attempt(self, texts: list[str], timeout_seconds: float, *, retry: bool = False) -> dict[int, str]:
         context = ""
         if self._recent:
             joined = "\n".join(self._recent[-CONTEXT_LINES:])
             context = f"Đoạn đã dịch ngay trước đó, giữ nguyên cách xưng hô:\n{joined}\n\nDịch tiếp:\n"
         numbered = "\n".join(f"{index}. {text}" for index, text in enumerate(texts, 1))
-        lines = _NUMBERED_LINE.findall(self._chat(context + numbered, timeout_seconds))
+        # The same prompt at a low temperature repeats the same mistake.
+        prompt = (RETRY_HINT if retry else "") + context + numbered
+        lines = _NUMBERED_LINE.findall(self._chat(prompt, timeout_seconds, 0.6 if retry else 0.2))
         return {int(number) - 1: text for number, text in lines
-                if 0 < int(number) <= len(texts) and not _FOREIGN_SCRIPT.search(text)
-                and not _ENGLISH_LEAK.search(text)}
+                if 0 < int(number) <= len(texts) and not _FOREIGN_SCRIPT.search(text)}
 
     def translate_batch(self, texts: list[str], source_code: str, *, batch_size: int = 16,
                         timeout_seconds: float | None = 300) -> list[Translation]:
@@ -190,19 +226,21 @@ class OllamaTranslator:
         per_call = (timeout_seconds or 600) * 0.4
         done: dict[int, str] = {}
         missing = list(range(len(texts)))
-        for _ in range(2):
+        for attempt in range(2):
             if not missing: break
             try:
-                found = self._attempt([texts[index] for index in missing], per_call)
+                found = self._attempt([texts[index] for index in missing], per_call, retry=attempt > 0)
             except (OSError, ValueError, KeyError, TypeError):
                 break
             done.update({missing[index]: text for index, text in found.items()})
             missing = [index for index in missing if index not in done]
-        rows = [Translation(done[index], src) if index in done else None for index in range(len(texts))]
+        rows: list[Translation | None] = [None] * len(texts)
+        for index, text in done.items():
+            repaired, warning = self._repair(text, source_code, timeout_seconds)
+            rows[index] = Translation(repaired, src, warning)
         if missing:
-            if self._fallback is None: self._fallback = self._load_fallback()
-            fallback = self._fallback.translate_batch([texts[index] for index in missing], source_code,
-                                                      timeout_seconds=timeout_seconds)
+            fallback = self._nllb().translate_batch([texts[index] for index in missing], source_code,
+                                                    timeout_seconds=timeout_seconds)
             for index, row in zip(missing, fallback):
                 rows[index] = Translation(row.text, row.source_code, "Câu này dịch bằng NLLB dự phòng")
         self._recent = (self._recent + [row.text for row in rows])[-CONTEXT_LINES:]

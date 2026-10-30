@@ -4,13 +4,16 @@ from backend.app import pipeline, translate
 from backend.app.translate import OllamaTranslator, Translation
 
 
+WORDS = {"ignoring": "Phớt lờ.", "overtake": "vượt qua"}
+
+
 class FakeNllb:
     def __init__(self):
         self.calls: list[list[str]] = []
 
     def translate_batch(self, texts, _source, *, timeout_seconds=None):
         self.calls.append(list(texts))
-        return [Translation(f"nllb:{text}", "eng_Latn") for text in texts]
+        return [Translation(WORDS.get(text, f"nllb:{text}"), "eng_Latn") for text in texts]
 
 
 def translator(replies: list, fallback: FakeNllb | None = None) -> tuple[OllamaTranslator, list[str]]:
@@ -18,7 +21,7 @@ def translator(replies: list, fallback: FakeNllb | None = None) -> tuple[OllamaT
     item = OllamaTranslator("test-model", lambda: fallback)
     prompts: list[str] = []
 
-    def chat(prompt, _timeout):
+    def chat(prompt, _timeout, _temperature=0.2):
         prompts.append(prompt)
         reply = replies.pop(0)
         if isinstance(reply, Exception): raise reply
@@ -43,15 +46,39 @@ def test_chinese_leak_is_retried_alone():
     rows = item.translate_batch(["Good", "A low hum"], "en")
 
     assert [row.text for row in rows] == ["Tốt", "Âm thanh trầm"]
-    assert prompts[1].endswith("1. A low hum")
+    assert prompts[1].endswith("1. A low hum") and "Mọi từ đều phải dịch" in prompts[1]
 
 
 def test_english_leak_is_retried_but_names_are_kept():
-    item, _ = translator(["1. Cô không thể ignoring nó\n2. Beijing rất đông", "1. Cô không thể phớt lờ nó"])
+    item, prompts = translator(["1. Cô không thể ignoring nó\n2. Beijing rất đông"])
 
     rows = item.translate_batch(["She could not ignore it", "Beijing is crowded"], "en")
 
     assert [row.text for row in rows] == ["Cô không thể phớt lờ nó", "Beijing rất đông"]
+    assert len(prompts) == 1
+
+
+def test_word_copied_from_source_is_retried():
+    item, _ = translator(["1. Anh cuối cùng cũng overtake được bố"])
+
+    rows = item.translate_batch(["He could finally overtake him"], "en")
+
+    assert rows[0].text == "Anh cuối cùng cũng vượt qua được bố"
+
+
+def test_leak_detection_uses_vietnamese_syllable_shape():
+    for sentence in ("cô không thể ignores nó", "âm thanh rumbles sâu", "barely noticeable", "the sound"):
+        assert translate._leaked_words(sentence), sentence
+    for sentence in ("trong nhanh thanh chung nghiêng khuya", "tin nhắn gửi Beijing qua email Google", "lúc 7 giờ, 3 km", "robot chơi game video"):
+        assert not translate._leaked_words(sentence), sentence
+
+
+def test_unrepairable_word_keeps_the_sentence_with_a_warning():
+    item, _ = translator(["1. Anh kept the zorgling lại"])
+
+    row = item.translate_batch(["He kept the zorgling"], "en")[0]
+
+    assert row.text.startswith("Anh") and row.warning == "Còn từ chưa dịch trong câu này"
 
 
 def test_persistent_failure_falls_back_to_nllb_with_a_warning():
