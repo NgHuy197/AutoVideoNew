@@ -55,7 +55,8 @@ Trong **Tùy chọn nâng cao**, bật **Lời chào tiếng Hà Lan ở đầu 
 câu chào do giọng Piper `nl_NL-pim-medium` đọc. Video dài thêm vài giây: khung hình
 đầu đứng yên trong lúc chào, phụ đề hiện câu chào rồi lùi đúng theo. Giọng này là
 tùy chọn, đặt tại `runtime\models\piper-nl\` trong thư mục dữ liệu; setup không tự
-tải. Lưu preset để giữ lựa chọn; thư mục theo dõi có ô bật riêng trong Cài đặt.
+tải. Thư mục input/output và lời chào được nhớ trong trình duyệt và dùng chung
+giữa tab Hàng đợi và Cài đặt; preset đang chọn sẽ giữ giá trị riêng của nó.
 
 Trong phần upload và trang **Cài đặt**, có thể tạo rồi chọn thư mục con nhiều
 cấp cho input và output. Video upload từ web được sao chép vào thư mục input

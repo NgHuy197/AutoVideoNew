@@ -3,8 +3,7 @@ import { Check, CircleAlert, LoaderCircle, RotateCcw, UploadCloud, X } from 'luc
 import SubtitleStyleEditor from './SubtitleStyleEditor'
 import { DEFAULT_SUBTITLE_STYLE, normalizeSubtitleStyle } from './subtitleStyle'
 import FolderPicker, { normalizeFolder } from './FolderPicker'
-
-const DEFAULT_GREETING = 'Hallo allemaal, welkom!'
+import { DEFAULT_GREETING, readSharedOptions, writeSharedOptions } from './sharedOptions'
 import {
   api,
   csrf,
@@ -98,18 +97,32 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
   const [audioMode, setAudioMode] = useState(initialPreset.audio_mode)
   const [subtitleMode, setSubtitleMode] = useState(initialPreset.subtitle_mode)
   const [subtitleStyle, setSubtitleStyle] = useState({ ...DEFAULT_SUBTITLE_STYLE })
-  const [greetingEnabled, setGreetingEnabled] = useState(false)
-  const [greetingText, setGreetingText] = useState(DEFAULT_GREETING)
+  const [shared] = useState(readSharedOptions)
+  const [greetingEnabled, setGreetingEnabled] = useState(shared.greeting)
+  const [greetingText, setGreetingText] = useState(shared.greetingText)
   const [dub, setDub] = useState(initialPreset.include_dubbing)
   const [originalTrack, setOriginalTrack] = useState(Boolean(initialPreset.include_original_track))
   const [reviewBeforeRender, setReviewBeforeRender] = useState(Boolean(initialPreset.review_before_render))
   const [priority, setPriority] = useState(Number(initialPreset.priority) || 0)
-  const [inputFolder, setInputFolder] = useState('')
-  const [outputFolder, setOutputFolder] = useState('')
+  const [inputFolder, setInputFolder] = useState(shared.inputFolder)
+  const [outputFolder, setOutputFolder] = useState(shared.outputFolder)
   const [presets, setPresets] = useState<SavedPreset[]>([])
   const [selectedPresetId, setSelectedPresetId] = useState('')
   const [presetName, setPresetName] = useState('')
   const [presetBusy, setPresetBusy] = useState(false)
+
+  // This component stays mounted behind the Settings tab, so pick up whatever
+  // was chosen there on return. A selected preset keeps its own values.
+  useEffect(() => {
+    if (!visible || selectedPresetId) return
+    const options = readSharedOptions()
+    setInputFolder(options.inputFolder); setOutputFolder(options.outputFolder)
+    setGreetingEnabled(options.greeting); setGreetingText(options.greetingText)
+  }, [visible])
+  useEffect(() => {
+    if (selectedPresetId) return
+    writeSharedOptions({ inputFolder, outputFolder, greeting: greetingEnabled, greetingText })
+  }, [inputFolder, outputFolder, greetingEnabled, greetingText])
 
   const updateItem = (key: string, update: Partial<UploadItem>) => {
     setItems(previous => previous.map(item => item.key === key ? { ...item, ...update } : item))

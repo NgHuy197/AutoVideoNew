@@ -47,3 +47,36 @@ test('stored upload styles are validated before resume', () => {
     assert.equal(isUploadSession({ ...session, preset: { ...preset, subtitle_style: invalid } }), false)
   }
 })
+
+const sharedSource = stripTypeScriptTypes(await readFile(new URL('src/sharedOptions.ts', frontend), 'utf8'))
+const shared = await import(dataModule(sharedSource))
+
+function withStorage(store, run) {
+  const previous = globalThis.localStorage
+  Object.defineProperty(globalThis, 'localStorage', { value: store, configurable: true, writable: true })
+  try { return run() } finally {
+    Object.defineProperty(globalThis, 'localStorage', { value: previous, configurable: true, writable: true })
+  }
+}
+
+test('shared options round-trip between the upload bar and Settings', () => {
+  const values = new Map()
+  const store = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) }
+  const options = { inputFolder: 'a/b', outputFolder: 'c', greeting: true, greetingText: 'Dag!' }
+  withStorage(store, () => {
+    shared.writeSharedOptions(options)
+    assert.deepEqual(shared.readSharedOptions(), options)
+  })
+})
+
+test('shared options fall back to defaults on bad or blocked storage', () => {
+  const defaults = { inputFolder: '', outputFolder: '', greeting: false, greetingText: shared.DEFAULT_GREETING }
+  for (const stored of ['{oops', '[]', 'null', JSON.stringify({ inputFolder: 7, greeting: 'yes' })]) {
+    withStorage({ getItem: () => stored }, () => assert.deepEqual(shared.readSharedOptions(), defaults))
+  }
+  const blocked = { getItem() { throw new Error('blocked') }, setItem() { throw new Error('blocked') } }
+  withStorage(blocked, () => {
+    assert.deepEqual(shared.readSharedOptions(), defaults)
+    assert.doesNotThrow(() => shared.writeSharedOptions(defaults))
+  })
+})
