@@ -169,3 +169,26 @@ def test_resource_readiness_has_recovery_margin(monkeypatch):
 
     # Below 4 GiB stops; recovery needs 4.5 GiB; once ready, 4.1 GiB is enough.
     assert states == [True, False, False, False, True, True]
+
+
+def test_resume_from_standby_restarts_queue_stall_timer(monkeypatch):
+    queue = service.QueueSupervisor()
+    queue._thread = SimpleNamespace(is_alive=lambda: True)
+    queue._last_tick = 100
+    monkeypatch.setattr(service.time, "monotonic", lambda: 8000)
+    assert not queue.is_healthy()
+
+    queue.note_resume()
+
+    assert queue.is_healthy()
+
+
+def test_resume_from_standby_delays_api_probes():
+    monitor = watchdog.ApiWatchdog()
+    monitor.failures = 2
+    monitor.resumed(1000)
+
+    assert not monitor.should_restart(1059, lambda: False)
+    assert monitor.failures == 0
+    assert not monitor.should_restart(1060, lambda: False)
+    assert monitor.failures == 1

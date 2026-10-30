@@ -6,6 +6,11 @@ from http.client import HTTPException
 from urllib.request import ProxyHandler, build_opener
 
 
+# The monotonic clock keeps counting through system standby. A main loop that
+# sleeps 2s and comes back this late means the whole process was frozen.
+SUSPEND_GAP_SECONDS = 60
+
+
 def api_healthy() -> bool:
     # Never send loopback probes through a user-configured proxy.
     try:
@@ -28,6 +33,11 @@ class ApiWatchdog:
     def started(self, current: float) -> None:
         self.started_at = current
         self.next_probe = current + 60  # allow cold imports/migrations
+        self.failures = 0
+
+    def resumed(self, current: float) -> None:
+        # Give the API and the network stack time to thaw after standby.
+        self.next_probe = current + 60
         self.failures = 0
 
     def failed(self, current: float) -> None:

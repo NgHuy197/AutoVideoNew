@@ -14,7 +14,7 @@ from .app.db import init_db
 from .app.diagnostics import append_json_line, process_identity
 from .app.process_control import OwnedProcess, close_owned, spawn_owned, terminate_owned
 from .app.service import QueueSupervisor
-from .app.watchdog import ApiWatchdog
+from .app.watchdog import SUSPEND_GAP_SECONDS, ApiWatchdog
 
 
 def _open_byte_lock(path: Path):
@@ -94,9 +94,15 @@ def main() -> None:
     api_process: OwnedProcess | None = None
     watchdog = ApiWatchdog()
     project_root = Path(__file__).parents[1]
+    last_loop = time.monotonic()
     try:
         while True:
             current = time.monotonic()
+            if current - last_loop > SUSPEND_GAP_SECONDS:
+                # Every thread was frozen, so silence here is not a queue stall.
+                queue.record_error("system-resume", f"process was suspended for {current - last_loop:.0f}s")
+                queue.note_resume(); watchdog.resumed(current)
+            last_loop = current
             if not queue.is_healthy():
                 queue.record_error("queue-watchdog", "Queue thread stopped or no tick for 15 minutes")
                 raise RuntimeError("Queue watchdog expired; service restart required")

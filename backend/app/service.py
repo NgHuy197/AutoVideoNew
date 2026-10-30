@@ -50,6 +50,10 @@ class QueueSupervisor:
         # leases that have stopped heartbeating, so an API reload cannot cancel a job.
         if self._thread: self._thread.join(timeout=5)
 
+    def note_resume(self) -> None:
+        """Restart the stall timer after standby froze this whole process."""
+        self._last_tick = time.monotonic()
+
     def is_healthy(self) -> bool:
         return bool(self._thread and self._thread.is_alive()
                     and time.monotonic() - self._last_tick < 900)
