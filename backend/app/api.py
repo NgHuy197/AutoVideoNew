@@ -104,6 +104,15 @@ class SettingsPatch(BaseModel):
 DEFAULT_GREETING = "Hallo allemaal, welkom!"
 
 
+# New jobs wait for the Start button, so options can still change first.
+HELD_UNTIL_START = {"status": "PAUSED", "pause_acknowledged": True}
+
+
+class QueueStart(BaseModel):
+    preset: dict | None = None
+    job_id: str | None = None
+
+
 def _normalize_preset(preset: dict | None) -> dict[str, Any]:
     value = dict(preset or {})
     for key in ("input_folder", "output_folder"):
@@ -262,7 +271,7 @@ def create_source_and_job(path: Path, preset: dict | None, watch_folder_id: str 
             job_name = safe_filename(original_name or source.original_name or path.name)
             job = Job(source_id=source.id, upload_id=upload_id, original_name=job_name, display_name=job_name,
                       mode_json=json_text(mode), config_json=json_text(mode), settings_snapshot_json=json_text(settings.snapshot()),
-                      priority=int(mode.get("priority", 0))); session.add(job); session.commit()
+                      priority=int(mode.get("priority", 0)), **HELD_UNTIL_START); session.add(job); session.commit()
             session.refresh(source); session.refresh(job); return source, job
 
 
@@ -520,7 +529,8 @@ def create_job(payload: JobCreate, _: None = Depends(_csrf)):
         name = safe_filename(source.original_name or "video")
         job = Job(source_id=source.id, original_name=name, display_name=name,
                   mode_json=json_text(mode), config_json=json_text(mode),
-                  settings_snapshot_json=json_text(settings.snapshot()), priority=int(mode.get("priority", 0)))
+                  settings_snapshot_json=json_text(settings.snapshot()), priority=int(mode.get("priority", 0)),
+                  **HELD_UNTIL_START)
         session.add(job); session.commit(); session.refresh(job); return _job_dict(session, job)
 
 
@@ -727,17 +737,35 @@ def pause_queue(_: None = Depends(_csrf)):
         return {"held": held, "pausing": pausing}
 
 
+def _apply_start_preset(job: Job, preset: dict) -> None:
+    """Use the options on screen at Start, keeping per-job input and priority."""
+    mode = {key: value for key, value in job.mode.items() if key not in ("greeting_enabled", "greeting_text")}
+    mode.update({key: value for key, value in preset.items() if key not in ("input_folder", "priority") and value is not None})
+    job.mode_json = job.config_json = json_text(mode)
+
+
 @router.post("/queue/resume")
-def resume_queue(_: None = Depends(_csrf)):
+def resume_queue(payload: QueueStart | None = None, _: None = Depends(_csrf)):
+    request = payload or QueueStart()
+    try:
+        preset = None if request.preset is None else _normalize_preset(request.preset)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     with SessionLocal() as session:
-        resumed = session.execute(update(Job).where(Job.status == "PAUSED").values(
-            status="QUEUED", error=None, pause_requested=False, pause_acknowledged=False,
-            lease_id=None, updated_at=now())).rowcount
+        scope = [Job.id == request.job_id] if request.job_id else []
+        jobs = list(session.scalars(select(Job).where(Job.status == "PAUSED", *scope)))
+        # Stage rows are checkpoints; a job with any keeps the options it began with.
+        started = set(session.scalars(select(StageRun.job_id).where(StageRun.job_id.in_([job.id for job in jobs]))))
+        for job in jobs:
+            if preset is not None and job.id not in started:
+                _apply_start_preset(job, preset)
+            job.status = "QUEUED"; job.error = None; job.pause_requested = False
+            job.pause_acknowledged = False; job.lease_id = None; job.updated_at = now()
         # A worker that has not reached its checkpoint simply carries on.
-        kept = session.execute(update(Job).where(Job.status == "PAUSING").values(
+        kept = session.execute(update(Job).where(Job.status == "PAUSING", *scope).values(
             status="RUNNING", pause_requested=False, updated_at=now())).rowcount
         session.commit()
-        return {"resumed": resumed + kept}
+        return {"resumed": len(jobs) + kept}
 
 
 @router.post("/queue/clear-completed")

@@ -96,6 +96,13 @@ def test_watch_backpressure_resumes_without_losing_files(tmp_path, monkeypatch):
         for row in session.scalars(select(WatchSeen)): row.created_at = now() - timedelta(minutes=1)
         session.commit()
     queue._watch_folders()
+    with sessions() as session:
+        # Jobs held for the Start button must not block the rest of the folder,
+        # so only a started job fills the queue.
+        started = session.scalar(select(Job))
+        assert started.status == "PAUSED"
+        started.status = "QUEUED"
+        session.commit()
     queue._watch_folders()  # queue full, second file must stay pending
     with sessions() as session:
         jobs = list(session.scalars(select(Job)))

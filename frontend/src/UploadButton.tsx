@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { type MutableRefObject, useEffect, useRef, useState } from 'react'
 import { Check, CircleAlert, LoaderCircle, RotateCcw, UploadCloud, X } from 'lucide-react'
 import SubtitleStyleEditor from './SubtitleStyleEditor'
 import { DEFAULT_SUBTITLE_STYLE, normalizeSubtitleStyle } from './subtitleStyle'
@@ -41,6 +41,7 @@ type UploadButtonProps = {
   onClearError: () => void
   visible: boolean
   onShowQueue: () => void
+  presetSource: MutableRefObject<(() => UploadPreset) | null>
 }
 
 type SavedPreset = { id: string; name: string; description?: string | null; config: UploadPreset }
@@ -63,7 +64,7 @@ function presetLabel(preset: UploadPreset) {
 
 function statusLabel(item: UploadItem) {
   if (item.status === 'fingerprinting') return item.note || 'Đang kiểm tra nhận diện tệp…'
-  if (item.status === 'completed') return 'Đã đưa vào hàng đợi'
+  if (item.status === 'completed') return 'Đã vào hàng đợi, chờ bấm Bắt đầu'
   if (item.status === 'cancelled') return 'Đã hủy tải lên'
   if (item.status === 'error') return 'Tải lên bị gián đoạn'
   const chunkSize = item.session?.chunkSize || 8 * 1024 * 1024
@@ -78,7 +79,7 @@ function itemProgress(item: UploadItem) {
   return Math.min(100, Math.round(bytes / item.file.size * 100))
 }
 
-export default function UploadButton({ onDone, onError, onClearError, visible, onShowQueue }: UploadButtonProps) {
+export default function UploadButton({ onDone, onError, onClearError, visible, onShowQueue, presetSource }: UploadButtonProps) {
   const input = useRef<HTMLInputElement>(null)
   const activeKeys = useRef(new Set<string>())
   const queuedKeys = useRef(new Set<string>())
@@ -142,6 +143,8 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
     input_folder: inputFolder,
     output_folder: outputFolder,
   })
+
+  presetSource.current = currentPreset
 
   const applyPreset = (preset: UploadPreset) => {
     setAudioMode(preset.audio_mode === 'mix' ? 'mix' : 'replace')
@@ -555,7 +558,7 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
       <label className="check-label"><input type="checkbox" checked={dub} onChange={event => setDub(event.target.checked)} /> Lồng tiếng</label>
       <button className="primary upload" onClick={() => input.current?.click()}><UploadCloud size={18} /> Thêm video</button>
     </div>
-    <div className="upload-route" role="status" aria-label="Cấu hình áp dụng cho video thêm tiếp theo">
+    <div className="upload-route" role="status" aria-label="Cấu hình áp dụng khi bấm Bắt đầu">
       <span><b>Input</b>{inputFolder || 'Thư mục gốc'}</span>
       <span><b>Output</b>{outputFolder || 'Thư mục gốc'}</span>
       <span className={greetingEnabled ? 'on' : 'off'} title={greetingEnabled ? greetingText : undefined}><b>Lời chào</b>{greetingEnabled ? 'Bật' : 'Tắt'}</span>

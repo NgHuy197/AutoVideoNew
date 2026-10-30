@@ -478,7 +478,7 @@ class QueueSupervisor:
             return
         with SessionLocal() as session:
             pending = int(session.scalar(select(func.count()).select_from(Job).where(
-                Job.status.in_(["QUEUED", "RUNNING", "PAUSED", "PAUSING", "CANCELLING", "WAITING_RESOURCES"]))) or 0)
+                Job.status.in_(["QUEUED", "RUNNING", "PAUSING", "CANCELLING", "WAITING_RESOURCES"]))) or 0)
             folders = list(session.scalars(select(WatchFolder).where(WatchFolder.enabled.is_(True))))
         budget = min(settings.watch_batch_size, max(0, settings.watch_queue_limit - pending))
         if not budget:

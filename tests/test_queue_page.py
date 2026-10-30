@@ -101,6 +101,55 @@ def test_resume_queue_requeues_paused_and_keeps_unstopped_worker(queue_db):
         assert session.get(Job, failed).status == "FAILED"
 
 
+def test_new_job_waits_for_start(queue_db, monkeypatch):
+    sessions, source_id = queue_db
+    monkeypatch.setattr(api, "SessionLocal", sessions)
+
+    job = api.create_job(api.JobCreate(source_id=source_id))
+
+    assert job["status"] == "PAUSED"
+    with sessions() as session:
+        assert session.get(Job, job["id"]).pause_acknowledged is True
+
+
+def test_start_applies_screen_options_only_to_unstarted_jobs(queue_db):
+    sessions, source_id = queue_db
+    fresh = _add_job(sessions, source_id, "PAUSED")
+    begun = _add_job(sessions, source_id, "PAUSED")
+    old_mode = api._normalize_preset({"output_folder": "old", "input_folder": "src", "greeting_enabled": True,
+                                      "source_language": "en", "priority": 10})
+    with sessions() as session:
+        session.get(Job, fresh).mode_json = session.get(Job, begun).mode_json = json_text(old_mode)
+        session.get(Job, fresh).priority = 10
+        session.add(StageRun(job_id=begun, stage="asr", unit_key="all", status="COMPLETED"))
+        session.commit()
+
+    preset = {"output_folder": "new", "input_folder": "other", "audio_mode": "mix", "priority": -10}
+    assert api.resume_queue(api.QueueStart(preset=preset)) == {"resumed": 2}
+
+    with sessions() as session:
+        started = session.get(Job, fresh)
+        assert started.status == "QUEUED" and started.priority == 10
+        assert started.mode["output_folder"] == "new" and started.mode["audio_mode"] == "mix"
+        assert started.mode["input_folder"] == "src" and started.mode["source_language"] == "en"
+        assert not started.mode.get("greeting_enabled")
+        assert started.config == started.mode
+        assert session.get(Job, begun).status == "QUEUED"
+        assert session.get(Job, begun).mode["output_folder"] == "old"
+
+
+def test_start_one_job_leaves_the_rest_waiting(queue_db):
+    sessions, source_id = queue_db
+    chosen = _add_job(sessions, source_id, "PAUSED")
+    other = _add_job(sessions, source_id, "PAUSED")
+
+    assert api.resume_queue(api.QueueStart(job_id=chosen)) == {"resumed": 1}
+
+    with sessions() as session:
+        assert session.get(Job, chosen).status == "QUEUED"
+        assert session.get(Job, other).status == "PAUSED"
+
+
 def test_clear_completed_removes_only_finished_jobs_and_their_rows(queue_db):
     sessions, source_id = queue_db
     done = _add_job(sessions, source_id, "COMPLETED")
