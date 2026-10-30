@@ -70,6 +70,11 @@ class AppSettings:
             self.runtime_root = self.runtime_root.resolve()
 
     @property
+    def translation_model(self) -> str:
+        """Local Ollama model for context-aware translation; empty uses NLLB only."""
+        return os.environ.get("VIDEOAUTO_TRANSLATION_MODEL", "qwen2.5:7b")
+
+    @property
     def greeting_voice(self) -> Path | None:
         """Optional Dutch Piper voice; it stays outside the required runtime set."""
         value = os.environ.get("VIDEOAUTO_PIPER_GREETING_MODEL")

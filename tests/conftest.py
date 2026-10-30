@@ -13,3 +13,5 @@ _root = Path(tempfile.mkdtemp(prefix="videoauto-tests-"))
 for _name, _folder in (("VIDEOAUTO_DATA_ROOT", "data"), ("VIDEOAUTO_INPUT_ROOT", "input"),
                        ("VIDEOAUTO_OUTPUT_ROOT", "output")):
     os.environ[_name] = str(_root / _folder)
+# Never reach a real local LLM from the suite.
+os.environ["VIDEOAUTO_TRANSLATION_MODEL"] = ""

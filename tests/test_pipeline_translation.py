@@ -43,7 +43,7 @@ def test_translation_batches_checkpoint_independently_and_resume_missing_only(tm
         job = Job(source_id=source.id, status="RUNNING", lease_id="lease-a", cancel_requested=False)
         session.add(job); session.flush()
         segments = [Segment(job_id=job.id, ordinal=index, start_ms=index * 1000,
-                            end_ms=(index + 1) * 1000, source_text=f"cue-{index}")
+                            end_ms=(index + 1) * 1000, source_text=f"cue-{index}.")
                     for index in range(5)]
         session.add_all(segments); session.commit()
 
@@ -51,14 +51,14 @@ def test_translation_batches_checkpoint_independently_and_resume_missing_only(tm
         with pytest.raises(MediaError, match="simulated translation failure"):
             Pipeline(job.id, "lease-a")._translate_segments_in_batches(session, segments, first, "en")
         assert first.calls == [
-            (["cue-0", "cue-1"], 2, STAGE_TIMEOUTS_SECONDS["translation"]),
-            (["cue-2", "cue-3"], 2, STAGE_TIMEOUTS_SECONDS["translation"]),
+            (["cue-0.", "cue-1."], 2, STAGE_TIMEOUTS_SECONDS["translation"]),
+            (["cue-2.", "cue-3."], 2, STAGE_TIMEOUTS_SECONDS["translation"]),
         ]
 
         session.expire_all()
         rows = list(session.scalars(select(Segment).where(Segment.job_id == job.id).order_by(Segment.ordinal)))
         runs = {run.unit_key: run.status for run in session.scalars(select(StageRun).where(StageRun.job_id == job.id))}
-        assert [row.translated_text for row in rows] == ["vi:cue-0", "vi:cue-1", "", "", ""]
+        assert [row.translated_text for row in rows] == ["vi:cue-0.", "vi:cue-1.", "", "", ""]
         assert runs == {"batch:0": "COMPLETED", "batch:1": "RUNNING"}
 
     with sessions() as session:
@@ -66,10 +66,10 @@ def test_translation_batches_checkpoint_independently_and_resume_missing_only(tm
         resumed = _FakeTranslator()
         Pipeline(job.id, "lease-a")._translate_segments_in_batches(session, rows, resumed, "en")
         assert resumed.calls == [
-            (["cue-2", "cue-3"], 2, STAGE_TIMEOUTS_SECONDS["translation"]),
-            (["cue-4"], 2, STAGE_TIMEOUTS_SECONDS["translation"]),
+            (["cue-2.", "cue-3."], 2, STAGE_TIMEOUTS_SECONDS["translation"]),
+            (["cue-4."], 2, STAGE_TIMEOUTS_SECONDS["translation"]),
         ]
-        assert all(row.translated_text == f"vi:cue-{row.ordinal}" for row in rows)
+        assert all(row.translated_text == f"vi:cue-{row.ordinal}." for row in rows)
         assert {run.unit_key: run.status for run in session.scalars(select(StageRun).where(StageRun.job_id == job.id))} == {
             "batch:0": "COMPLETED", "batch:1": "COMPLETED", "batch:2": "COMPLETED"
         }

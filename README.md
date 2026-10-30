@@ -51,6 +51,11 @@ cần được cài trên máy hoặc có trong thư mục font runtime; nếu t
 font thay thế. Tùy chỉnh áp dụng cho video thêm sau đó ở chế độ **Ghi vào hình**.
 SRT và track bật/tắt trong MP4 do trình phát quyết định kiểu hiển thị.
 
+Bản dịch ưu tiên model cục bộ qua Ollama (`qwen2.5:7b`, đổi bằng
+`VIDEOAUTO_TRANSLATION_MODEL`, để trống thì chỉ dùng NLLB) để giữ ngữ cảnh và xưng
+hô nhất quán; app không tự tải model này. Thiếu Ollama, thiếu model hoặc câu dịch
+lỗi sẽ tự chuyển sang NLLB. Câu chỉ có tiếng động không được dịch hay đọc.
+
 Trong **Tùy chọn nâng cao**, bật **Lời chào tiếng Hà Lan ở đầu video** để mở đầu bằng
 câu chào do giọng Piper `nl_NL-pim-medium` đọc. Video dài thêm vài giây: khung hình
 đầu đứng yên trong lúc chào, phụ đề hiện câu chào rồi lùi đúng theo. Giọng này là

@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+import json
+import os
 from pathlib import Path
+import re
+import shutil
+import subprocess
 import time
+from urllib.request import ProxyHandler, Request, build_opener
 
 from .config import settings
 from .media import MediaError
@@ -81,6 +88,133 @@ class NLLBTranslator:
             joined = " ".join(translated_flat[cursor:cursor + len(pieces)]).strip(); cursor += len(pieces)
             output.append(Translation(joined, src))
         return output
+
+
+OLLAMA_URL = "http://127.0.0.1:11434"
+LLM_SYSTEM_PROMPT = """Bạn là biên dịch viên lồng tiếng chuyên nghiệp. Dịch lời kể sang tiếng Việt nói tự nhiên, trôi chảy.
+Quy tắc:
+- Đọc toàn bộ trước khi dịch để hiểu mạch truyện và nhân vật.
+- Mỗi nhân vật chỉ dùng MỘT cách gọi xuyên suốt, chọn theo tuổi và vai vế (trẻ nhỏ: "cậu bé"/"cô bé"; người lớn: "anh ấy"/"cô ấy"; người già: "ông ấy"/"bà ấy"). Không đổi giữa chừng.
+- Người kể nói với khán giả thì gọi khán giả là "bạn". Câu đệm như "You see" dịch theo nghĩa.
+- Dịch theo nghĩa trong ngữ cảnh, không dịch từng chữ; giữ nguyên tên riêng và số liệu.
+- Không thêm hay bỏ ý. Chỉ viết bằng tiếng Việt, tuyệt đối không dùng chữ Hán hay ngôn ngữ khác.
+- Giữ đúng số dòng và số thứ tự, mỗi dòng dạng "số. bản dịch". Chỉ trả về các dòng dịch."""
+_NUMBERED_LINE = re.compile(r"^\s*(\d+)[.)]\s*(.+?)\s*$", re.M)
+# Qwen occasionally slips into Chinese mid-sentence; Vietnamese never uses these.
+_FOREIGN_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0400-\u04ff\u0e00-\u0e7f]")
+# Lowercase English that slipped through. Vietnamese has no such endings, and
+# capitalized names stay allowed.
+_ENGLISH_LEAK = re.compile(r"(?<![\w-])(?:[a-z]{2,}(?:ing|tion|ness|ed)|the|and|with|that|this|was|were)(?![\w-])")
+CONTEXT_LINES = 5
+
+
+def _opener():
+    # Never send loopback calls through a user-configured proxy.
+    return build_opener(ProxyHandler({}))
+
+
+def _find_ollama() -> str | None:
+    bundled = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
+    return shutil.which("ollama") or (str(bundled) if bundled.is_file() else None)
+
+
+def _ollama_models() -> list[str]:
+    with _opener().open(f"{OLLAMA_URL}/api/tags", timeout=3) as response:
+        return [str(item.get("name")) for item in json.load(response).get("models", [])]
+
+
+def ollama_ready(model: str, *, wait_seconds: float = 15) -> bool:
+    """Return whether ``model`` can be used, starting the local server if needed."""
+    try:
+        return model in _ollama_models()
+    except (OSError, ValueError):
+        pass
+    executable = _find_ollama()
+    if not executable:
+        return False
+    try:
+        subprocess.Popen([executable, "serve"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError:
+        return False
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        try:
+            return model in _ollama_models()
+        except (OSError, ValueError):
+            time.sleep(0.5)
+    return False
+
+
+class OllamaTranslator:
+    """Context-aware translation through a local Ollama model.
+
+    It keeps the ``translate_batch`` contract, so durable batches work the same
+    way. Lines it cannot translate cleanly go to the NLLB fallback, so a model
+    failure costs quality on those lines rather than failing the job.
+    """
+
+    batch_size = 16
+
+    def __init__(self, model: str, load_fallback: Callable[[], NLLBTranslator]):
+        self.model = model
+        self._load_fallback = load_fallback
+        self._fallback: NLLBTranslator | None = None
+        self._recent: list[str] = []
+
+    def _chat(self, prompt: str, timeout_seconds: float) -> str:
+        body = json.dumps({"model": self.model, "stream": False, "keep_alive": "2m",
+                           "options": {"temperature": 0.2, "num_ctx": 8192},
+                           "messages": [{"role": "system", "content": LLM_SYSTEM_PROMPT},
+                                        {"role": "user", "content": prompt}]}).encode("utf-8")
+        request = Request(f"{OLLAMA_URL}/api/chat", body, {"Content-Type": "application/json"})
+        with _opener().open(request, timeout=timeout_seconds) as response:
+            return str(json.load(response)["message"]["content"])
+
+    def _attempt(self, texts: list[str], timeout_seconds: float) -> dict[int, str]:
+        context = ""
+        if self._recent:
+            joined = "\n".join(self._recent[-CONTEXT_LINES:])
+            context = f"Đoạn đã dịch ngay trước đó, giữ nguyên cách xưng hô:\n{joined}\n\nDịch tiếp:\n"
+        numbered = "\n".join(f"{index}. {text}" for index, text in enumerate(texts, 1))
+        lines = _NUMBERED_LINE.findall(self._chat(context + numbered, timeout_seconds))
+        return {int(number) - 1: text for number, text in lines
+                if 0 < int(number) <= len(texts) and not _FOREIGN_SCRIPT.search(text)
+                and not _ENGLISH_LEAK.search(text)}
+
+    def translate_batch(self, texts: list[str], source_code: str, *, batch_size: int = 16,
+                        timeout_seconds: float | None = 300) -> list[Translation]:
+        src = NLLB_CODES.get(source_code.lower(), source_code)
+        if src == "vie_Latn": return [Translation(text, src) for text in texts]
+        # Two tries plus the fallback must fit inside one stage deadline.
+        per_call = (timeout_seconds or 600) * 0.4
+        done: dict[int, str] = {}
+        missing = list(range(len(texts)))
+        for _ in range(2):
+            if not missing: break
+            try:
+                found = self._attempt([texts[index] for index in missing], per_call)
+            except (OSError, ValueError, KeyError, TypeError):
+                break
+            done.update({missing[index]: text for index, text in found.items()})
+            missing = [index for index in missing if index not in done]
+        rows = [Translation(done[index], src) if index in done else None for index in range(len(texts))]
+        if missing:
+            if self._fallback is None: self._fallback = self._load_fallback()
+            fallback = self._fallback.translate_batch([texts[index] for index in missing], source_code,
+                                                      timeout_seconds=timeout_seconds)
+            for index, row in zip(missing, fallback):
+                rows[index] = Translation(row.text, row.source_code, "Câu này dịch bằng NLLB dự phòng")
+        self._recent = (self._recent + [row.text for row in rows])[-CONTEXT_LINES:]
+        return rows
+
+    def close(self) -> None:
+        """Free the model's RAM before TTS and render."""
+        body = json.dumps({"model": self.model, "keep_alive": 0}).encode("utf-8")
+        try:
+            _opener().open(Request(f"{OLLAMA_URL}/api/generate", body, {"Content-Type": "application/json"}), timeout=10).close()
+        except OSError:
+            pass
 
 
 def split_for_translation(text: str, tokenizer, max_tokens: int = 480) -> list[str]:

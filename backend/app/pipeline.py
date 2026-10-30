@@ -16,8 +16,9 @@ from .config import settings
 from .db import Artifact, Event, Job, Segment, SessionLocal, Source, StageRun, json_text, now
 from .media import MediaError, extract_audio, run_command, sha256_file, validate_video
 from .renderer import build_voice_track, render_video
+from .sentences import distribute, group_cues, looks_truncated, split_sentences, strip_sound_tags
 from .storage_folders import folder_path
-from .translate import NLLBTranslator
+from .translate import NLLBTranslator, OllamaTranslator, ollama_ready
 from .tts import PiperSynthesizer, fit_to_slot
 
 
@@ -128,6 +129,19 @@ def _normalize_chunk_segments(session, job_id: str, duration_ms: int, chunk_ms: 
         previous = row
         previous_chunk = int(row.chunk_index)
         previous_raw_end = old_end
+
+
+def _load_nllb() -> NLLBTranslator:
+    if not settings.nllb_model: raise MediaError("NLLB model path is not configured")
+    return NLLBTranslator(settings.nllb_model, threads=settings.cpu_threads)
+
+
+def _make_translator():
+    """Prefer the context-aware local LLM; NLLB covers a missing Ollama or model."""
+    model = settings.translation_model
+    if model and ollama_ready(model):
+        return OllamaTranslator(model, _load_nllb)
+    return _load_nllb()
 
 
 class Pipeline:
@@ -244,10 +258,13 @@ class Pipeline:
         earlier progress.
         """
         batch_size = self._translator_batch_size(translator)
-        batches = [segments[start:start + batch_size] for start in range(0, len(segments), batch_size)]
+        # One unit is a run of cues forming whole sentences. Translating cue by
+        # cue split sentences mid-way and made the model drop the fragments.
+        groups = group_cues(segments)
+        batches = [groups[start:start + batch_size] for start in range(0, len(groups), batch_size)]
         for batch_index, batch in enumerate(batches):
             unit_key = f"batch:{batch_index}"
-            pending = [item for item in batch if not item.translated_text]
+            pending = [group for group in batch if any(not item.translated_text for item in group)]
             batch_run = session.scalar(select(StageRun).where(StageRun.job_id == self.job_id,
                                                               StageRun.stage == "translation",
                                                               StageRun.unit_key == unit_key))
@@ -263,17 +280,26 @@ class Pipeline:
             # This both marks the unit in progress and refreshes the 300s
             # deadline immediately before its external model call.
             self._stage(session, "translation", "RUNNING", unit_key=unit_key)
-            outputs = translator.translate_batch([item.source_text for item in pending], language,
-                                                  batch_size=batch_size,
-                                                  timeout_seconds=STAGE_TIMEOUTS_SECONDS["translation"])
-            if len(outputs) != len(pending):
-                raise MediaError(f"NLLB returned {len(outputs)} translations for {len(pending)} segments")
-            for item, translated in zip(pending, outputs):
-                item.translated_text = translated.text
-                if translated.warning:
-                    item.warning_json = json_text(item.warnings + [translated.warning])
-                if not item.reading_text:
-                    item.reading_text = item.translated_text
+            sources = [[strip_sound_tags(item.source_text) for item in group] for group in pending]
+            sentences = [split_sentences(" ".join(texts)) for texts in sources]
+            flat = [sentence for items in sentences for sentence in items]
+            outputs = translator.translate_batch(flat, language, batch_size=batch_size,
+                                                 timeout_seconds=STAGE_TIMEOUTS_SECONDS["translation"])
+            if len(outputs) != len(flat):
+                raise MediaError(f"NLLB returned {len(outputs)} translations for {len(flat)} sentences")
+            cursor = 0
+            for group, texts, items in zip(pending, sources, sentences):
+                translated = outputs[cursor:cursor + len(items)]; cursor += len(items)
+                joined = " ".join(row.text for row in translated)
+                notes = [row.warning for row in translated if row.warning]
+                if looks_truncated(" ".join(texts), joined):
+                    notes.append("Bản dịch ngắn bất thường, có thể thiếu nội dung")
+                for item, part in zip(group, distribute(joined, [len(text) for text in texts])):
+                    item.translated_text = part
+                    if notes:
+                        item.warning_json = json_text(item.warnings + notes)
+                    if not item.reading_text:
+                        item.reading_text = part
             # _stage(COMPLETED) performs the lease assertion and commits both
             # segment changes and this unit's durable checkpoint atomically.
             self._stage(session, "translation", "COMPLETED", unit_key=unit_key)
@@ -429,19 +455,21 @@ class Pipeline:
             )) if config.get("review_before_render") else None
             review_approved = bool(review_run and review_run.status == "COMPLETED")
             language = config.get("source_language") or detected_language or "en"
-            self._stage(session, "translation"); self._progress(session, "translation", 42, "NLLB local đang dịch sang tiếng Việt")
+            self._stage(session, "translation"); self._progress(session, "translation", 42, "Đang dịch sang tiếng Việt")
             if not review_approved:
                 if language.lower() in {"vi", "vie", "vie_latn"}:
                     for item in segments:
-                        if not item.translated_text: item.translated_text = item.source_text
-                elif not all(x.translated_text for x in segments):
-                    if not settings.nllb_model: raise MediaError("NLLB model path is not configured")
+                        if not item.translated_text: item.translated_text = strip_sound_tags(item.source_text)
+                elif any(strip_sound_tags(x.source_text) and not x.translated_text for x in segments):
                     # Loading tokenizer/weights is outside each bounded inference
                     # deadline.  Once loaded, every batch gets a fresh 300s stage
                     # deadline immediately before ``translate_batch``.
                     self._clear_stage_deadline(session)
-                    translator = NLLBTranslator(settings.nllb_model, threads=settings.cpu_threads)
-                    self._translate_segments_in_batches(session, segments, translator, language)
+                    translator = _make_translator()
+                    try:
+                        self._translate_segments_in_batches(session, segments, translator, language)
+                    finally:
+                        if hasattr(translator, "close"): translator.close()
                 for item in segments:
                     if not item.reading_text: item.reading_text = item.translated_text
             self._lease_guard(session); session.commit(); self._stage(session, "translation", "COMPLETED"); self._progress(session, "translation", 58)
@@ -475,6 +503,8 @@ class Pipeline:
 
             include_dubbing = bool(config.get("include_dubbing", True))
             spoken_segments = [item for item in segments if item.reading_text.strip()]
+            # A clip with only sound effects keeps its own audio.
+            include_dubbing = include_dubbing and bool(spoken_segments)
             for item in segments:
                 if not item.reading_text.strip():
                     item.tts_path = None
