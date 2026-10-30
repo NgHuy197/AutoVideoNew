@@ -541,13 +541,10 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
   </div>
 
   const advancedSummary = [
-    `Input: ${inputFolder || 'thư mục gốc'}`,
-    `Output: ${outputFolder || 'thư mục gốc'}`,
     originalTrack && 'giữ track gốc',
     reviewBeforeRender && 'duyệt script',
-    greetingEnabled && 'lời chào',
     priority !== 0 && `ưu tiên ${priority}`,
-  ].filter(Boolean).join(' · ')
+  ].filter(Boolean).join(' · ') || 'preset, thư mục, kiểu phụ đề'
 
   return <div className="upload-area">
     <div className="upload-controls">
@@ -557,6 +554,11 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
       <label>Phụ đề<select value={subtitleMode} onChange={event => setSubtitleMode(event.target.value)}><option value="burn">Ghi vào hình</option><option value="soft">Track bật/tắt</option><option value="srt">SRT rời</option><option value="none">Không phụ đề</option></select></label>
       <label className="check-label"><input type="checkbox" checked={dub} onChange={event => setDub(event.target.checked)} /> Lồng tiếng</label>
       <button className="primary upload" onClick={() => input.current?.click()}><UploadCloud size={18} /> Thêm video</button>
+    </div>
+    <div className="upload-route" role="status" aria-label="Cấu hình áp dụng cho video thêm tiếp theo">
+      <span><b>Input</b>{inputFolder || 'Thư mục gốc'}</span>
+      <span><b>Output</b>{outputFolder || 'Thư mục gốc'}</span>
+      <span className={greetingEnabled ? 'on' : 'off'} title={greetingEnabled ? greetingText : undefined}><b>Lời chào</b>{greetingEnabled ? 'Bật' : 'Tắt'}</span>
     </div>
     <details className="upload-advanced">
       <summary>Tùy chọn nâng cao <span>{advancedSummary}</span></summary>
