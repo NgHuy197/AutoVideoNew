@@ -43,7 +43,7 @@ def test_page_counts_every_unfinished_status_as_active(queue_db):
 
     assert page["total"] == 9
     assert len(page["items"]) == 4
-    assert page["counts"] == {"active": 6, "done": 1, "failed": 2}
+    assert page["counts"] == {"active": 6, "done": 1, "failed": 2, "pausable": 4, "paused": 1}
     assert len(api.page_jobs(limit=4, offset=8)["items"]) == 1
 
 
@@ -66,6 +66,61 @@ def test_delete_job_removes_queue_rows_including_events(queue_db):
         for model in (Segment, StageRun, Artifact, Event):
             owners = {row.job_id for row in session.scalars(select(model))}
             assert owners == {keep_id}
+
+
+def test_pause_queue_holds_waiting_jobs_and_asks_running_workers(queue_db):
+    sessions, source_id = queue_db
+    jobs = {status: _add_job(sessions, source_id, status)
+            for status in ("QUEUED", "WAITING_RESOURCES", "RUNNING", "COMPLETED", "FAILED", "DRAFT")}
+
+    assert api.pause_queue() == {"held": 2, "pausing": 1}
+
+    with sessions() as session:
+        result = {status: session.get(Job, job_id) for status, job_id in jobs.items()}
+    assert result["QUEUED"].status == "PAUSED"
+    assert result["WAITING_RESOURCES"].status == "PAUSED"
+    assert result["RUNNING"].status == "PAUSING" and result["RUNNING"].pause_requested is True
+    assert [result[status].status for status in ("COMPLETED", "FAILED", "DRAFT")] == ["COMPLETED", "FAILED", "DRAFT"]
+
+
+def test_resume_queue_requeues_paused_and_keeps_unstopped_worker(queue_db):
+    sessions, source_id = queue_db
+    paused = _add_job(sessions, source_id, "PAUSED")
+    pausing = _add_job(sessions, source_id, "PAUSING")
+    failed = _add_job(sessions, source_id, "FAILED")
+    with sessions() as session:
+        session.get(Job, pausing).pause_requested = True
+        session.commit()
+
+    assert api.resume_queue() == {"resumed": 2}
+
+    with sessions() as session:
+        assert session.get(Job, paused).status == "QUEUED"
+        assert session.get(Job, pausing).status == "RUNNING"
+        assert session.get(Job, pausing).pause_requested is False
+        assert session.get(Job, failed).status == "FAILED"
+
+
+def test_clear_completed_removes_only_finished_jobs_and_their_rows(queue_db):
+    sessions, source_id = queue_db
+    done = _add_job(sessions, source_id, "COMPLETED")
+    warned = _add_job(sessions, source_id, "COMPLETED_WITH_WARNINGS")
+    keep = {_add_job(sessions, source_id, status) for status in ("QUEUED", "RUNNING", "FAILED", "PAUSED", "DRAFT")}
+    with sessions() as session:
+        session.add(Segment(job_id=done, ordinal=0, start_ms=0, end_ms=1000, source_text="hi"))
+        session.add(Artifact(job_id=warned, kind="video", path="out.mp4"))
+        session.add(Event(job_id=done, kind="completed"))
+        session.get(Job, next(iter(keep))).parent_job_id = done
+        session.commit()
+
+    assert api.clear_completed_jobs() == {"deleted": 2, "media_preserved": True}
+
+    with sessions() as session:
+        assert set(session.scalars(select(Job.id))) == keep
+        assert not list(session.scalars(select(Job).where(Job.parent_job_id.is_not(None))))
+        for model in (Segment, Artifact, Event):
+            assert not list(session.scalars(select(model)))
+    assert api.clear_completed_jobs() == {"deleted": 0, "media_preserved": True}
 
 
 def test_delete_job_refuses_running_and_unknown_jobs(queue_db):

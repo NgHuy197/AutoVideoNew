@@ -102,6 +102,9 @@ Quy tắc:
 _NUMBERED_LINE = re.compile(r"^\s*(\d+)[.)]\s*(.+?)\s*$", re.M)
 # Qwen occasionally slips into Chinese mid-sentence; Vietnamese never uses these.
 _FOREIGN_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0400-\u04ff\u0e00-\u0e7f]")
+# Its Chinese punctuation is harmless to the sentence, so swap it instead of retrying.
+_CJK_PUNCTUATION = str.maketrans({"。": ". ", "，": ", ", "！": "! ", "？": "? ", "；": "; ", "：": ": ",
+                                  "（": "(", "）": ")"})
 # Every Vietnamese syllable fits onset + vowels + coda. Lowercase ASCII words
 # that do not are untranslated foreign words; capitalized names stay allowed.
 _VIETNAMESE_SYLLABLE = re.compile(
@@ -116,6 +119,10 @@ _LOANWORDS = {"album", "axit", "bar", "blog", "boxing", "bunker", "burger", "cam
 CONTEXT_LINES = 5
 RETRY_HINT = "Lưu ý: lần trước còn sót từ không phải tiếng Việt. Mọi từ đều phải dịch sang tiếng Việt.\n"
 MAX_WORD_REPLY = 4
+
+
+def _plain_punctuation(text: str) -> str:
+    return re.sub(r" {2,}", " ", text.translate(_CJK_PUNCTUATION)).strip()
 
 
 def _leaked_words(translation: str) -> set[str]:
@@ -215,7 +222,7 @@ class OllamaTranslator:
         # The same prompt at a low temperature repeats the same mistake.
         prompt = (RETRY_HINT if retry else "") + context + numbered
         lines = _NUMBERED_LINE.findall(self._chat(prompt, timeout_seconds, 0.6 if retry else 0.2))
-        return {int(number) - 1: text for number, text in lines
+        return {int(number) - 1: _plain_punctuation(text) for number, text in lines
                 if 0 < int(number) <= len(texts) and not _FOREIGN_SCRIPT.search(text)}
 
     def translate_batch(self, texts: list[str], source_code: str, *, batch_size: int = 16,

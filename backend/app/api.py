@@ -532,6 +532,10 @@ def list_jobs(status: str | None = None, limit: int = Query(100, ge=1, le=500)):
         return [_job_dict(session, j) for j in session.scalars(query)]
 
 
+WAITING_STATUSES = ("QUEUED", "RETRY_WAIT", "WAITING_RESOURCES")
+DONE_STATUSES = ("COMPLETED", "COMPLETED_WITH_WARNINGS")
+
+
 @router.get("/jobs/page")
 def page_jobs(limit: int = Query(10, ge=1, le=100), offset: int = Query(0, ge=0)):
     with SessionLocal() as session:
@@ -547,8 +551,19 @@ def page_jobs(limit: int = Query(10, ge=1, le=100), offset: int = Query(0, ge=0)
                     "QUEUED", "RUNNING", "PAUSED", "PAUSING", "CANCELLING", "RETRY_WAIT", "WAITING_RESOURCES")),
                 "done": sum(status_counts.get(status, 0) for status in ("COMPLETED", "COMPLETED_WITH_WARNINGS")),
                 "failed": sum(status_counts.get(status, 0) for status in ("FAILED", "DRAFT")),
+                "pausable": sum(status_counts.get(status, 0) for status in ("RUNNING", *WAITING_STATUSES)),
+                "paused": sum(status_counts.get(status, 0) for status in ("PAUSED", "PAUSING")),
             },
         }
+
+
+def _delete_job_rows(session, job_ids: list[str]) -> None:
+    session.execute(delete(Segment).where(Segment.job_id.in_(job_ids)))
+    session.execute(delete(StageRun).where(StageRun.job_id.in_(job_ids)))
+    session.execute(delete(Artifact).where(Artifact.job_id.in_(job_ids)))
+    session.execute(delete(Event).where(Event.job_id.in_(job_ids)))
+    session.execute(update(Job).where(Job.parent_job_id.in_(job_ids)).values(parent_job_id=None))
+    session.execute(update(Upload).where(Upload.completed_job_id.in_(job_ids)).values(completed_job_id=None))
 
 
 @router.delete("/jobs/{job_id}")
@@ -567,12 +582,7 @@ def delete_job(job_id: str, _: None = Depends(_csrf)):
             if not job:
                 raise HTTPException(404, "job not found")
             raise HTTPException(409, f"cannot remove job in {job.status}; cancel it and wait until it stops")
-        session.execute(delete(Segment).where(Segment.job_id == job_id))
-        session.execute(delete(StageRun).where(StageRun.job_id == job_id))
-        session.execute(delete(Artifact).where(Artifact.job_id == job_id))
-        session.execute(delete(Event).where(Event.job_id == job_id))
-        session.execute(update(Job).where(Job.parent_job_id == job_id).values(parent_job_id=None))
-        session.execute(update(Upload).where(Upload.completed_job_id == job_id).values(completed_job_id=None))
+        _delete_job_rows(session, [job_id])
         session.commit()
         return {"deleted": True, "id": job_id, "media_preserved": True}
 
@@ -703,6 +713,42 @@ def _mutate_job(job_id: str, action: str):
 
 for _action in ("pause", "resume", "cancel", "retry"):
     router.add_api_route(f"/jobs/{{job_id}}/{_action}", lambda job_id, action=_action, _=Depends(_csrf): _mutate_job(job_id, action), methods=["POST"])
+
+
+@router.post("/queue/pause")
+def pause_queue(_: None = Depends(_csrf)):
+    """Hold waiting jobs now; a running worker stops at its next checkpoint."""
+    with SessionLocal() as session:
+        held = session.execute(update(Job).where(Job.status.in_(WAITING_STATUSES)).values(
+            status="PAUSED", pause_acknowledged=True, updated_at=now())).rowcount
+        pausing = session.execute(update(Job).where(Job.status == "RUNNING").values(
+            status="PAUSING", pause_requested=True, updated_at=now())).rowcount
+        session.commit()
+        return {"held": held, "pausing": pausing}
+
+
+@router.post("/queue/resume")
+def resume_queue(_: None = Depends(_csrf)):
+    with SessionLocal() as session:
+        resumed = session.execute(update(Job).where(Job.status == "PAUSED").values(
+            status="QUEUED", error=None, pause_requested=False, pause_acknowledged=False,
+            lease_id=None, updated_at=now())).rowcount
+        # A worker that has not reached its checkpoint simply carries on.
+        kept = session.execute(update(Job).where(Job.status == "PAUSING").values(
+            status="RUNNING", pause_requested=False, updated_at=now())).rowcount
+        session.commit()
+        return {"resumed": resumed + kept}
+
+
+@router.post("/queue/clear-completed")
+def clear_completed_jobs(_: None = Depends(_csrf)):
+    with SessionLocal() as session:
+        job_ids = list(session.scalars(select(Job.id).where(Job.status.in_(DONE_STATUSES))))
+        if job_ids:
+            session.execute(delete(Job).where(Job.id.in_(job_ids), Job.status.in_(DONE_STATUSES)))
+            _delete_job_rows(session, job_ids)
+            session.commit()
+        return {"deleted": len(job_ids), "media_preserved": True}
 
 
 @router.get("/jobs/{job_id}/segments")

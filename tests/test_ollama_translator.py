@@ -40,6 +40,15 @@ def test_numbered_lines_map_back_to_sentences():
     assert all(row.warning is None for row in rows)
 
 
+def test_chinese_punctuation_becomes_plain_without_a_retry():
+    item, prompts = translator(["1. Nó chính hãng。 Bây giờ，rất đắt！"])
+
+    rows = item.translate_batch(["It is authentic. Now, very expensive!"], "en")
+
+    assert rows[0].text == "Nó chính hãng. Bây giờ, rất đắt!"
+    assert len(prompts) == 1
+
+
 def test_chinese_leak_is_retried_alone():
     item, prompts = translator(["1. Tốt\n2. âm thanh 低调的嗡鸣声", "1. Âm thanh trầm"])
 
