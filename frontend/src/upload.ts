@@ -12,6 +12,8 @@ export type UploadPreset = {
   include_dubbing: boolean
   include_original_track?: boolean
   review_before_render?: boolean
+  greeting_enabled?: boolean
+  greeting_text?: string
   priority?: number
   input_folder?: string
   output_folder?: string
@@ -80,6 +82,7 @@ export function presetKey(preset: UploadPreset) {
     include_dubbing: Boolean(preset.include_dubbing),
     include_original_track: Boolean(preset.include_original_track),
     review_before_render: Boolean(preset.review_before_render),
+    ...(preset.greeting_enabled ? { greeting_enabled: true, greeting_text: String(preset.greeting_text ?? '') } : {}),
     priority: Number.isSafeInteger(preset.priority) ? preset.priority : 0,
     input_folder: normalizeFolder(preset.input_folder),
     output_folder: normalizeFolder(preset.output_folder),
@@ -139,6 +142,8 @@ export function isUploadSession(value: unknown): value is UploadSession {
     if (key in preset && typeof preset[key] !== 'boolean') return false
   }
   if ('review_before_render' in preset && typeof preset.review_before_render !== 'boolean') return false
+  if ('greeting_enabled' in preset && typeof preset.greeting_enabled !== 'boolean') return false
+  if ('greeting_text' in preset && typeof preset.greeting_text !== 'string') return false
   if ('subtitle_style' in preset && !isSubtitleStyle(preset.subtitle_style)) return false
   if ('priority' in preset && (!Number.isSafeInteger(preset.priority) || typeof preset.priority !== 'number')) return false
   if ('input_folder' in preset && !isFolder(preset.input_folder)) return false

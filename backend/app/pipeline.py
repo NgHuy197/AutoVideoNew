@@ -199,6 +199,8 @@ class Pipeline:
         # legacy jobs created before audio_index was persisted.
         config.setdefault("audio_index", job.mode.get("audio_index"))
         config.setdefault("review_before_render", job.mode.get("review_before_render", False))
+        config.setdefault("greeting_enabled", job.mode.get("greeting_enabled", False))
+        config.setdefault("greeting_text", job.mode.get("greeting_text"))
         return config
 
     def _clear_stage_deadline(self, session) -> None:
@@ -506,6 +508,15 @@ class Pipeline:
             self._stage(session, "render"); self._progress(session, "render", 78, "Đang ghép audio và phụ đề")
             self._ensure_owned()
             voice_track = build_voice_track(spoken_segments, duration_ms, job_dir / "voice-track.wav") if include_dubbing else None
+            greeting_text = config.get("greeting_text") if config.get("greeting_enabled") else None
+            greeting_audio = None
+            if greeting_text:
+                greeting_voice = settings.greeting_voice
+                if not greeting_voice or not greeting_voice.is_file():
+                    raise MediaError("Chưa có giọng tiếng Hà Lan cho lời chào (models/piper-nl/nl_NL-pim-medium.onnx).")
+                greeting_audio, _ = PiperSynthesizer(greeting_voice, threads=settings.cpu_threads).synthesize(
+                    greeting_text, job_dir / "greeting.wav", cache_root=settings.cache_root)
+                self._ensure_owned()
             # Sources are content-addressed and can be shared by uploads with
             # different filenames. Use the immutable job name for output
             # presentation and collision-free stems.
@@ -518,7 +529,8 @@ class Pipeline:
                                   audio_mode=config.get("audio_mode", "replace") if include_dubbing else "original", subtitle_mode=config.get("subtitle_mode", "burn"),
                                   audio_index=selected_audio_index, width=int(media["video"].get("width") or 1920), height=int(media["video"].get("height") or 1080),
                                   include_original_track=bool(config.get("include_original_track", False)),
-                                  subtitle_style=config.get("subtitle_style"))
+                                  subtitle_style=config.get("subtitle_style"),
+                                  greeting_audio=greeting_audio, greeting_text=greeting_text)
             try:
                 self._ensure_owned()
             except LeaseLost:

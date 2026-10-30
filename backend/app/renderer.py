@@ -4,11 +4,24 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from .config import settings
 from .media import MediaError, audio_duration, ffprobe, run_command, sha256_file
 from .subtitles import write_ass, write_srt
 from .subtitle_style import normalize_subtitle_style
+
+
+# Silence after the greeting, before the video starts moving.
+GREETING_PAUSE_MS = 500
+
+
+def _with_greeting(segments: list, text: str, offset_ms: int) -> list:
+    """Return caption rows on the output timeline, greeting cue first."""
+    shifted = [SimpleNamespace(start_ms=int(item.start_ms) + offset_ms, end_ms=int(item.end_ms) + offset_ms,
+                               translated_text=getattr(item, "translated_text", ""), text=getattr(item, "text", ""))
+               for item in segments]
+    return [SimpleNamespace(start_ms=0, end_ms=offset_ms, translated_text=text, text=text), *shifted]
 
 
 def _escape_filter_path(path: Path) -> str:
@@ -93,7 +106,7 @@ def _write_json_atomic(path: Path, value: dict) -> Path:
     return path
 
 
-def _transcript_payload(segments: list, duration_ms: int) -> dict:
+def _transcript_payload(segments: list, duration_ms: int, offset_ms: int = 0) -> dict:
     rows = []
     for ordinal, segment in enumerate(segments):
         rows.append({
@@ -109,13 +122,17 @@ def _transcript_payload(segments: list, duration_ms: int) -> dict:
             "tempo": getattr(segment, "tempo", None),
             "warnings": list(getattr(segment, "warnings", []) or []),
         })
-    return {"schema_version": 1, "duration_ms": int(duration_ms), "segments": rows}
+    payload = {"schema_version": 1, "duration_ms": int(duration_ms), "segments": rows}
+    # Segment times stay on the source timeline; a greeting shifts the output.
+    if offset_ms: payload["timeline_offset_ms"] = int(offset_ms)
+    return payload
 
 
 def render_video(source: Path, voice_track: Path | None, segments: list, duration_ms: int, destination: Path,
                  *, audio_mode: str = "replace", subtitle_mode: str = "burn", audio_index: int = 0,
                  width: int = 1920, height: int = 1080,
-                 include_original_track: bool = False, subtitle_style: dict | None = None) -> dict:
+                 include_original_track: bool = False, subtitle_style: dict | None = None,
+                 greeting_audio: Path | None = None, greeting_text: str | None = None) -> dict:
     style = normalize_subtitle_style(subtitle_style) if subtitle_style is not None else None
     destination.parent.mkdir(parents=True, exist_ok=True)
     srt_path = destination.with_suffix(".srt")
@@ -123,8 +140,10 @@ def render_video(source: Path, voice_track: Path | None, segments: list, duratio
     # safe basename and run FFmpeg from the output directory so user names such
     # as ``O'Brien.mp4`` cannot terminate the quoted filter expression.
     ass_path = destination.parent / f".videoauto-{uuid.uuid4().hex}.ass"
-    if subtitle_mode in {"srt", "soft"}: write_srt(segments, srt_path)
-    if subtitle_mode == "burn": write_ass(segments, ass_path, width, height, style=style)
+    greeting_ms = round(audio_duration(greeting_audio) * 1000) + GREETING_PAUSE_MS if greeting_audio else 0
+    captions = _with_greeting(segments, greeting_text or "", greeting_ms) if greeting_audio else segments
+    if subtitle_mode in {"srt", "soft"}: write_srt(captions, srt_path)
+    if subtitle_mode == "burn": write_ass(captions, ass_path, width, height, style=style)
     partial = destination.with_suffix(destination.suffix + ".partial")
     if partial.exists(): partial.unlink()
     args = [str(settings.ffmpeg), "-y", "-i", str(source)]
@@ -133,6 +152,14 @@ def render_video(source: Path, voice_track: Path | None, segments: list, duratio
     if subtitle_mode == "soft":
         args += ["-i", str(srt_path)]
         subtitle_input = 2 if voice_track else 1
+    if greeting_audio:
+        greeting_input = 1 + bool(voice_track) + (subtitle_mode == "soft")
+        args += ["-i", str(greeting_audio)]
+    # Keep the dubbed/mixed result as the first (default) track and optionally
+    # expose the selected source audio as a second selectable track. A
+    # subtitle-only/original-audio render already has the source once, so the
+    # option is meaningful only when a voice track exists.
+    include_original = bool(include_original_track and voice_track)
     filters: list[str] = []
     if voice_track and audio_mode == "mix":
         filters += [f"[0:a:{audio_index}]volume=0.125[orig]", "[1:a]volume=1.0[voice]", "[orig][voice]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95[aout]"]
@@ -141,19 +168,33 @@ def render_video(source: Path, voice_track: Path | None, segments: list, duratio
         audio_map = "1:a"
     else: audio_map = f"0:a:{audio_index}"
     video_map = "0:v"
+    video_prefix = ""
+    original_map = f"0:a:{audio_index}"
+    if greeting_audio:
+        # Hold the first frame while the greeting plays, then run the video.
+        offset = f"{greeting_ms / 1000:.3f}"
+        video_prefix = f"tpad=start_duration={offset}:start_mode=clone"
+        body = audio_map if audio_map.startswith("[") else f"[{audio_map}]"
+        # ``-af`` cannot follow a complex graph, so normalize inside it.
+        loudness = ",loudnorm=I=-16:TP=-1.5:LRA=11" if voice_track and audio_mode != "mix" else ""
+        filters += [f"[{greeting_input}:a]aresample=48000,aformat=channel_layouts=stereo,apad=whole_dur={offset}[greeting]",
+                    f"{body}aresample=48000,aformat=channel_layouts=stereo[body]",
+                    f"[greeting][body]concat=n=2:v=0:a=1{loudness}[final]"]
+        audio_map = "[final]"
+        if include_original:
+            filters.append(f"[0:a:{audio_index}]adelay={greeting_ms}:all=1[original]")
+            original_map = "[original]"
     if subtitle_mode == "burn":
         ass_value = f"'{ass_path.name}'"
         if settings.font_dir and settings.font_dir.is_dir() and "'" not in str(settings.font_dir): ass_value += f":fontsdir='{_escape_filter_path(settings.font_dir)}'"
-        filters.append(f"[0:v]ass={ass_value}[vout]"); video_map = "[vout]"
+        chain = f"{video_prefix}," if video_prefix else ""
+        filters.append(f"[0:v]{chain}ass={ass_value}[vout]"); video_map = "[vout]"
+    elif video_prefix:
+        filters.append(f"[0:v]{video_prefix}[vout]"); video_map = "[vout]"
     if filters: args += ["-filter_complex", ";".join(filters)]
     args += ["-map", video_map, "-map", audio_map]
-    # Keep the dubbed/mixed result as the first (default) track and optionally
-    # expose the selected source audio as a second selectable track. A
-    # subtitle-only/original-audio render already has the source once, so the
-    # option is meaningful only when a voice track exists.
-    include_original = bool(include_original_track and voice_track)
     if include_original:
-        args += ["-map", f"0:a:{audio_index}"]
+        args += ["-map", original_map]
     if subtitle_mode == "soft":
         args += ["-map", f"{subtitle_input}:0", "-c:s", "mov_text", "-metadata:s:s:0", "language=vie"]
     if include_original:
@@ -161,21 +202,23 @@ def render_video(source: Path, voice_track: Path | None, segments: list, duratio
                  "-disposition:a:0", "default", "-disposition:a:1", "0"]
     args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
              "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", "-f", "mp4", str(partial)]
-    if voice_track and audio_mode != "mix": args[-1:-1] = ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
+    if voice_track and audio_mode != "mix" and not greeting_audio: args[-1:-1] = ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
     run_command(args, timeout=1800, cwd=destination.parent)
     if not partial.exists(): raise MediaError("render output missing")
-    verification = _verify_output(partial, duration_ms, subtitle_mode == "soft", include_original)
+    output_ms = duration_ms + greeting_ms
+    verification = _verify_output(partial, output_ms, subtitle_mode == "soft", include_original)
     partial.replace(destination)
     if subtitle_mode == "burn": ass_path.unlink(missing_ok=True)
     transcript_path = destination.with_suffix(".transcript.json")
     report_path = destination.with_suffix(".report.json")
-    _write_json_atomic(transcript_path, _transcript_payload(segments, duration_ms))
+    _write_json_atomic(transcript_path, _transcript_payload(segments, duration_ms, greeting_ms))
     report = {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "source": str(source),
         "output": str(destination),
-        "duration_ms": int(duration_ms),
+        "duration_ms": int(output_ms),
+        "greeting": {"text": greeting_text, "duration_ms": greeting_ms} if greeting_audio else None,
         "audio_mode": audio_mode,
         "subtitle_mode": subtitle_mode,
         "subtitle_style": style if subtitle_mode == "burn" else None,

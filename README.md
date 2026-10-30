@@ -51,6 +51,12 @@ cần được cài trên máy hoặc có trong thư mục font runtime; nếu t
 font thay thế. Tùy chỉnh áp dụng cho video thêm sau đó ở chế độ **Ghi vào hình**.
 SRT và track bật/tắt trong MP4 do trình phát quyết định kiểu hiển thị.
 
+Trong **Tùy chọn nâng cao**, bật **Lời chào tiếng Hà Lan ở đầu video** để mở đầu bằng
+câu chào do giọng Piper `nl_NL-pim-medium` đọc. Video dài thêm vài giây: khung hình
+đầu đứng yên trong lúc chào, phụ đề hiện câu chào rồi lùi đúng theo. Giọng này là
+tùy chọn, đặt tại `runtime\models\piper-nl\` trong thư mục dữ liệu; setup không tự
+tải. Lưu preset để giữ lựa chọn; thư mục theo dõi có ô bật riêng trong Cài đặt.
+
 Trong phần upload và trang **Cài đặt**, có thể tạo rồi chọn thư mục con nhiều
 cấp cho input và output. Video upload từ web được sao chép vào thư mục input
 đã chọn để giữ bản gốc theo nhóm; file kết quả nằm dưới thư mục output đã chọn.

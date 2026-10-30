@@ -3,6 +3,8 @@ import { Check, CircleAlert, LoaderCircle, RotateCcw, UploadCloud, X } from 'luc
 import SubtitleStyleEditor from './SubtitleStyleEditor'
 import { DEFAULT_SUBTITLE_STYLE, normalizeSubtitleStyle } from './subtitleStyle'
 import FolderPicker, { normalizeFolder } from './FolderPicker'
+
+const DEFAULT_GREETING = 'Hallo allemaal, welkom!'
 import {
   api,
   csrf,
@@ -96,6 +98,8 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
   const [audioMode, setAudioMode] = useState(initialPreset.audio_mode)
   const [subtitleMode, setSubtitleMode] = useState(initialPreset.subtitle_mode)
   const [subtitleStyle, setSubtitleStyle] = useState({ ...DEFAULT_SUBTITLE_STYLE })
+  const [greetingEnabled, setGreetingEnabled] = useState(false)
+  const [greetingText, setGreetingText] = useState(DEFAULT_GREETING)
   const [dub, setDub] = useState(initialPreset.include_dubbing)
   const [originalTrack, setOriginalTrack] = useState(Boolean(initialPreset.include_original_track))
   const [reviewBeforeRender, setReviewBeforeRender] = useState(Boolean(initialPreset.review_before_render))
@@ -120,6 +124,7 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
     include_dubbing: dub,
     include_original_track: originalTrack,
     review_before_render: reviewBeforeRender,
+    ...(greetingEnabled ? { greeting_enabled: true, greeting_text: greetingText.trim() || DEFAULT_GREETING } : {}),
     priority: Number.isSafeInteger(priority) ? priority : 0,
     input_folder: inputFolder,
     output_folder: outputFolder,
@@ -132,6 +137,8 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
     setDub(Boolean(preset.include_dubbing))
     setOriginalTrack(Boolean(preset.include_original_track))
     setReviewBeforeRender(Boolean(preset.review_before_render))
+    setGreetingEnabled(Boolean(preset.greeting_enabled))
+    setGreetingText(preset.greeting_text || DEFAULT_GREETING)
     setPriority(Number.isSafeInteger(preset.priority) ? Number(preset.priority) : 0)
     setInputFolder(normalizeFolder(preset.input_folder))
     setOutputFolder(normalizeFolder(preset.output_folder))
@@ -525,6 +532,7 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
     `Output: ${outputFolder || 'thư mục gốc'}`,
     originalTrack && 'giữ track gốc',
     reviewBeforeRender && 'duyệt script',
+    greetingEnabled && 'lời chào',
     priority !== 0 && `ưu tiên ${priority}`,
   ].filter(Boolean).join(' · ')
 
@@ -543,6 +551,8 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
         <div className="upload-controls">
           <label className="check-label"><input type="checkbox" checked={originalTrack} onChange={event => setOriginalTrack(event.target.checked)} /> Giữ track gốc phụ</label>
           <label className="check-label"><input type="checkbox" checked={reviewBeforeRender} onChange={event => setReviewBeforeRender(event.target.checked)} /> Duyệt script trước khi ghép</label>
+          <label className="check-label"><input type="checkbox" checked={greetingEnabled} onChange={event => setGreetingEnabled(event.target.checked)} /> Lời chào tiếng Hà Lan ở đầu video</label>
+          {greetingEnabled && <label className="greeting-text">Câu chào<input value={greetingText} maxLength={200} onChange={event => setGreetingText(event.target.value)} /></label>}
           <label>Ưu tiên<input className="priority-input" type="number" min="-100" max="100" step="1" value={priority} onChange={event => setPriority(Number.parseInt(event.target.value, 10) || 0)} /></label>
         </div>
         <div className="preset-controls" aria-label="Quản lý preset">

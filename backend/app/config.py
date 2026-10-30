@@ -69,6 +69,13 @@ class AppSettings:
         if self.runtime_root is not None:
             self.runtime_root = self.runtime_root.resolve()
 
+    @property
+    def greeting_voice(self) -> Path | None:
+        """Optional Dutch Piper voice; it stays outside the required runtime set."""
+        value = os.environ.get("VIDEOAUTO_PIPER_GREETING_MODEL")
+        if value: return Path(value)
+        return self.runtime_root / "models" / "piper-nl" / "nl_NL-pim-medium.onnx" if self.runtime_root else None
+
     def ensure_dirs(self) -> None:
         for path in (self.data_root, self.input_root, self.output_root, self.sources_root, self.jobs_root, self.inbox_root,
                      self.cache_root, self.logs_root, self.database_root, self.config_root,

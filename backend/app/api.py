@@ -44,6 +44,8 @@ class JobCreate(BaseModel):
         "include_original_track", "include_original_audio", "include_original_audio_track",
         "original_audio_secondary"))
     review_before_render: bool = False
+    greeting_enabled: bool = False
+    greeting_text: str | None = None
     priority: int = 0
     input_folder: str | None = None
     output_folder: str | None = None
@@ -99,6 +101,9 @@ class SettingsPatch(BaseModel):
     cpu_threads: int | None = Field(default=None, ge=1, le=64)
 
 
+DEFAULT_GREETING = "Hallo allemaal, welkom!"
+
+
 def _normalize_preset(preset: dict | None) -> dict[str, Any]:
     value = dict(preset or {})
     for key in ("input_folder", "output_folder"):
@@ -123,6 +128,21 @@ def _normalize_preset(preset: dict | None) -> dict[str, Any]:
     review_before_render = value.get("review_before_render", False)
     if not isinstance(review_before_render, bool):
         raise ValueError("review_before_render must be a boolean")
+    greeting_enabled = value.get("greeting_enabled", False)
+    if not isinstance(greeting_enabled, bool):
+        raise ValueError("greeting_enabled must be a boolean")
+    if greeting_enabled:
+        greeting_text = value.get("greeting_text")
+        greeting_text = DEFAULT_GREETING if greeting_text is None else greeting_text
+        if not isinstance(greeting_text, str) or not 1 <= len(greeting_text.strip()) <= 200:
+            raise ValueError("greeting_text must contain 1 to 200 characters")
+        # The text is spoken and written into ASS/SRT, so block override syntax.
+        if any(ord(char) < 32 or char in "{}\\" for char in greeting_text):
+            raise ValueError("greeting_text contains unsupported characters")
+        value["greeting_text"] = greeting_text.strip()
+    else:
+        # Preserve the persisted shape of old presets and watcher identities.
+        value.pop("greeting_enabled", None); value.pop("greeting_text", None)
     audio_index = value.get("audio_index")
     if audio_index is not None:
         try:
