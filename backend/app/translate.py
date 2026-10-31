@@ -74,7 +74,7 @@ class NLLBTranslator:
                 raise MediaError("translation unit exceeds 480 tokens")
             with self._torch.inference_mode():
                 generated = self.model.generate(**encoded, forced_bos_token_id=self.tokenizer.convert_tokens_to_ids("vie_Latn"),
-                                                 num_beams=4, max_new_tokens=512)
+                                                 num_beams=4, max_new_tokens=512, no_repeat_ngram_size=3)
             if timeout_seconds is not None and time.monotonic() - started > timeout_seconds:
                 raise MediaError("NLLB translation batch deadline exceeded")
             texts_out = self.tokenizer.batch_decode(generated, skip_special_tokens=True)
@@ -117,6 +117,9 @@ _LOANWORDS = {"album", "axit", "bar", "blog", "boxing", "bunker", "burger", "cam
               "pizza", "play", "radio", "robot", "show", "silicone", "snap", "soda", "spam", "taxi", "tennis", "vali",
               "video", "virus", "vitamin", "web", "website", "wifi"}
 CONTEXT_LINES = 5
+# With no request around it, a numbered Chinese list comes back copied, not translated.
+LINES_HEADER = "Dịch từng dòng sau sang tiếng Việt, tuyệt đối không chép lại nguyên văn:\n"
+LINES_FOOTER = "\n\nBản dịch tiếng Việt:"
 RETRY_HINT = "Lưu ý: lần trước còn sót từ không phải tiếng Việt. Mọi từ đều phải dịch sang tiếng Việt.\n"
 MAX_WORD_REPLY = 4
 
@@ -220,7 +223,7 @@ class OllamaTranslator:
             context = f"Đoạn đã dịch ngay trước đó, giữ nguyên cách xưng hô:\n{joined}\n\nDịch tiếp:\n"
         numbered = "\n".join(f"{index}. {text}" for index, text in enumerate(texts, 1))
         # The same prompt at a low temperature repeats the same mistake.
-        prompt = (RETRY_HINT if retry else "") + context + numbered
+        prompt = (RETRY_HINT if retry else "") + context + LINES_HEADER + numbered + LINES_FOOTER
         lines = _NUMBERED_LINE.findall(self._chat(prompt, timeout_seconds, 0.6 if retry else 0.2))
         return {int(number) - 1: _plain_punctuation(text) for number, text in lines
                 if 0 < int(number) <= len(texts) and not _FOREIGN_SCRIPT.search(text)}

@@ -10,6 +10,9 @@ from .config import settings
 from .media import MediaError, audio_duration, run_command, sha256_file
 
 
+TEMPO_TOLERANCE_MS = 5
+
+
 def tempo_chain(factor: float) -> str:
     """Return an ``atempo`` chain with each filter within FFmpeg's bounds."""
     if factor <= 0: raise ValueError("tempo must be positive")
@@ -175,6 +178,8 @@ def fit_to_slot(source: Path, destination: Path, slot_ms: int) -> tuple[Path, in
         return destination, actual_ms, 1.0, warnings
 
     tempo = actual_ms / slot_ms
+    # atempo works in whole frames, so a few ms over the slot may be unreachable.
+    limit_seconds = (slot_ms + TEMPO_TOLERANCE_MS) / 1000
     transformed = destination.with_name(destination.stem + ".tempo.wav.partial")
     transformed.unlink(missing_ok=True)
     try:
@@ -182,12 +187,12 @@ def fit_to_slot(source: Path, destination: Path, slot_ms: int) -> tuple[Path, in
         for _ in range(4):
             _ffmpeg_audio_filter(source, transformed, tempo_chain(tempo))
             measured_seconds = audio_duration(transformed)
-            if measured_seconds <= slot_ms / 1000:
+            if measured_seconds <= limit_seconds:
                 break
             # Leave a small sample-sized headroom on the next pass instead of
             # accepting an oversize result and trimming spoken samples.
             tempo *= (measured_seconds / (slot_ms / 1000)) * 1.0005
-        if measured_seconds > slot_ms / 1000:
+        if measured_seconds > limit_seconds:
             measured_ms = round(measured_seconds * 1000)
             raise MediaError(f"tempo fitting could not preserve full audio ({measured_ms}ms vs {slot_ms}ms)")
         pad = max(0, slot_ms - round(measured_seconds * 1000))

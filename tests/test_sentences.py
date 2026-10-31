@@ -64,3 +64,10 @@ def test_looks_truncated_flags_dropped_sentences():
     assert looks_truncated(source, "Nó giữ cho cô ấy tỉnh táo.")
     assert not looks_truncated(source, "Nó khiến cô ấy thức trắng đêm. Cô lục soát khắp nhà vì âm thanh đó")
     assert not looks_truncated("Yes.", "Có.")
+
+
+def test_unpunctuated_chinese_cues_stay_separate():
+    cues = [SimpleNamespace(source_text=text, start_ms=index * 1000, end_ms=index * 1000 + 900)
+            for index, text in enumerate(["你的工资和一个职员", "哦真的呀", "如果说不具备财务思维"])]
+
+    assert [len(group) for group in group_cues(cues)] == [1, 1, 1]

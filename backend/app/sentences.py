@@ -11,6 +11,9 @@ _SENTENCE_END = re.compile(rf"[.!?…{_TERMINAL}][\"'”’)\]]*$")
 _BOUNDARY = re.compile(rf"(?<=[.!?…])[\"'”’)\]]*\s+(?=[^a-zà-ỹ\s])|(?<=[{_TERMINAL}])\s*")
 _ABBREVIATION = re.compile(r"(?:^|\s)(?:Mr|Mrs|Ms|Dr|Prof|St|Sr|Jr|vs|etc|No)\.$")
 _CLAUSE_END = re.compile(r"[,;:.!?…]$")
+# Whisper leaves Chinese and Japanese without punctuation, so cues cannot be
+# joined into sentences, and a joined run mixes speakers. Keep those cues whole.
+_UNSPACED_SCRIPT = re.compile(r"[぀-ヿ㐀-鿿]")
 MAX_GROUP_CUES = 8
 MAX_GAP_MS = 2000
 SNAP_WORDS = 3
@@ -51,7 +54,7 @@ def group_cues(segments: list) -> list[list]:
         if current and int(segment.start_ms) - int(current[-1].end_ms) >= MAX_GAP_MS:
             groups.append(current); current = []
         current.append(segment)
-        if _SENTENCE_END.search(text) or len(current) >= MAX_GROUP_CUES:
+        if _SENTENCE_END.search(text) or _UNSPACED_SCRIPT.search(text) or len(current) >= MAX_GROUP_CUES:
             groups.append(current); current = []
     if current:
         groups.append(current)

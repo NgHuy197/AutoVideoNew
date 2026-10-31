@@ -55,7 +55,7 @@ def test_chinese_leak_is_retried_alone():
     rows = item.translate_batch(["Good", "A low hum"], "en")
 
     assert [row.text for row in rows] == ["Tốt", "Âm thanh trầm"]
-    assert prompts[1].endswith("1. A low hum") and "Mọi từ đều phải dịch" in prompts[1]
+    assert "1. A low hum" in prompts[1] and "Good" not in prompts[1] and "Mọi từ đều phải dịch" in prompts[1]
 
 
 def test_english_leak_is_retried_but_names_are_kept():
