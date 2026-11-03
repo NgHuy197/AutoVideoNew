@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.app.sentences import distribute, group_cues, looks_truncated, split_sentences, strip_sound_tags
+from backend.app.sentences import break_cost, distribute, group_cues, looks_truncated, split_sentences, strip_sound_tags
+from backend.app.subtitles import caption_cues, merge_fragments
 
 
 def cue(text: str, start: int = 0, end: int | None = None):
@@ -71,3 +72,48 @@ def test_unpunctuated_chinese_cues_stay_separate():
             for index, text in enumerate(["你的工资和一个职员", "哦真的呀", "如果说不具备财务思维"])]
 
     assert [len(group) for group in group_cues(cues)] == [1, 1, 1]
+
+
+def test_break_cost_prefers_clause_seams_over_compound_words():
+    assert break_cost("chết,", "nhưng") < break_cost("đọc", "báo") < break_cost("báo", "cáo")
+    assert break_cost("ty", "trong") < break_cost("của", "các")
+    assert break_cost("kiếm", "được") > break_cost("đọc", "báo")
+
+
+def test_distribute_avoids_cutting_a_compound_word():
+    assert distribute("Công ty kiếm được nhiều lợi nhuận trong năm nay", [10, 10])[0].split()[-1] != "lợi"
+
+
+def test_captions_break_beside_function_words_and_keep_compounds():
+    text = ("Cuối cùng đã đến video hướng dẫn bạn đọc báo cáo tài chính "
+            "của các công ty trong TOP 500 thế giới rồi.")
+    cues = caption_cues(SimpleNamespace(start_ms=0, end_ms=3400, translated_text=text))
+    lines = [line for _, _, caption in cues for line in caption.split("\n")]
+    assert " ".join(lines).split() == text.split()
+    for first, second in zip(lines, lines[1:]):
+        assert (first.split()[-1], second.split()[0]) not in {("báo", "cáo"), ("hướng", "dẫn"), ("tài", "chính")}
+    # No caption is left holding a lone trailing word.
+    assert all(len(caption.split()) > 2 for _, _, caption in cues)
+
+
+def test_tight_two_line_fit_takes_another_cue_instead_of_splitting_a_word():
+    text = "cả hai đều sẽ chết, nhưng có thể phẫu thuật tách rời, cho phép một bé sống sót."
+    cues = caption_cues(SimpleNamespace(start_ms=0, end_ms=7000, translated_text=text))
+    assert all("phẫu\nthuật" not in caption for _, _, caption in cues)
+    assert " ".join(caption for _, _, caption in cues).split() == text.split()
+
+
+def test_dangling_fragment_shares_the_screen_with_the_next_cue():
+    rows = [SimpleNamespace(start_ms=0, end_ms=3000, translated_text="Lợi nhuận kinh doanh của nó thua lỗ"),
+            SimpleNamespace(start_ms=3000, end_ms=3600, translated_text="Nhưng"),
+            SimpleNamespace(start_ms=3600, end_ms=6300, translated_text="Nó nhận được trợ cấp từ chính phủ")]
+    merged = merge_fragments(rows)
+    assert [row.translated_text for row in merged] == [rows[0].translated_text,
+                                                       "Nhưng Nó nhận được trợ cấp từ chính phủ"]
+    assert caption_cues(merged[1]) == [(3000, 6300, "Nhưng\nNó nhận được trợ cấp từ chính phủ")]
+
+
+def test_complete_unpunctuated_cues_are_not_run_together():
+    rows = [SimpleNamespace(start_ms=0, end_ms=1300, translated_text="Nó không có tính liên tục"),
+            SimpleNamespace(start_ms=1300, end_ms=2200, translated_text="Nó là sự kiện ngẫu nhiên")]
+    assert len(merge_fragments(rows)) == 2
