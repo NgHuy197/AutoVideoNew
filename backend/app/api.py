@@ -22,6 +22,7 @@ from sqlalchemy import delete, func, select, update
 
 from .api_usage import record_call, usage_summary
 from .config import settings
+from .units import format_bytes
 from .translate import ApiTranslator
 from .db import Artifact, Event, Job, Preset, Segment, SessionLocal, Source, StageRun, Upload, WatchFolder, Setting, init_db, json_text, now
 from .media import MediaError, sha256_file
@@ -196,7 +197,7 @@ def _normalize_preset(preset: dict | None) -> dict[str, Any]:
 def create_source_and_job(path: Path, preset: dict | None, watch_folder_id: str | None = None, original_name: str | None = None,
                           expected_sha256: str | None = None, upload_id: str | None = None) -> tuple[Source, Job]:
     path = path.resolve(); size = path.stat().st_size
-    if size > settings.max_file_bytes: raise ValueError("file exceeds configured size limit")
+    if size > settings.max_file_bytes: raise ValueError(f"Video nặng {format_bytes(size)}, vượt giới hạn {format_bytes(settings.max_file_bytes)}")
     digest = sha256_file(path)
     if expected_sha256 and not secrets.compare_digest(digest, expected_sha256):
         raise ValueError("source changed while it was being stabilized")
@@ -328,10 +329,13 @@ def diagnostics():
 @router.post("/uploads")
 def create_upload(payload: dict, _: None = Depends(_csrf)):
     filename = safe_filename(str(payload.get("filename", "video"))); total = int(payload.get("total_bytes", 0))
-    if total <= 0 or total > settings.max_file_bytes: raise HTTPException(413, "invalid upload size")
+    if total <= 0: raise HTTPException(413, "invalid upload size")
+    if total > settings.max_file_bytes:
+        raise HTTPException(413, f"Video nặng {format_bytes(total)}, vượt giới hạn {format_bytes(settings.max_file_bytes)}. Tăng giới hạn trong Cài đặt nếu cần.")
     try:
         if shutil.disk_usage(settings.data_root).free < settings.min_free_bytes + total:
-            raise HTTPException(507, "not enough free disk space for this upload")
+            free = shutil.disk_usage(settings.data_root).free
+            raise HTTPException(507, f"Ổ đĩa chỉ còn trống {format_bytes(free)}, không đủ cho video {format_bytes(total)} (cần giữ lại {format_bytes(settings.min_free_bytes)})")
     except OSError as exc:
         raise HTTPException(503, f"cannot inspect free disk space: {exc}") from exc
     upload_id = secrets.token_hex(16); path = settings.inbox_root / f"{upload_id}.partial"; path.parent.mkdir(parents=True, exist_ok=True)

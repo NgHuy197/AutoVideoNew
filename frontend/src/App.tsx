@@ -4,6 +4,7 @@ import UploadButton from './UploadButton'
 import FolderPicker from './FolderPicker'
 import { API, api, csrf, type UploadPreset } from './upload'
 import { DEFAULT_GREETING, readSharedOptions, writeSharedOptions } from './sharedOptions'
+import { formatBytes, formatClock, formatCount, formatCountText, formatDuration, formatMs, formatResetDuration } from './units'
 
 type Job = { id:string; filename:string; status:string; stage:string; progress:number; priority:number; mode:Record<string, string | boolean | number | null>; error?:string; warnings?:string[]; created_at?:string }
 type QueueCounts = { active:number; done:number; failed:number; pausable:number; paused:number }
@@ -79,8 +80,8 @@ function Detail({job,segments,setSegments,markDirty,artifacts,save}:{job:Job|nul
     {job.error&&<div className="error-box"><AlertTriangle size={16}/>{job.error}</div>}
     {isReview&&<div className="review-notice"><AlertTriangle size={16}/><span>Kiểm tra và chỉnh script bên dưới. Video chỉ tiếp tục lồng tiếng và ghép hình sau khi bạn xác nhận.</span></div>}
     <div className="mode-pills"><span>{job.mode.audio_mode==='mix'?'Trộn audio gốc':'Thay audio gốc'}</span><span>{job.mode.subtitle_mode==='burn'?'Phụ đề ghi vào hình':job.mode.subtitle_mode==='soft'?'Phụ đề bật/tắt':job.mode.subtitle_mode==='srt'?'SRT rời':'Không phụ đề'}</span><span>Input: {jobFolder(job.mode.input_folder)}</span><span>Output: {jobFolder(job.mode.output_folder)}</span><span>{job.mode.greeting_enabled===true?`Lời chào: ${String(job.mode.greeting_text||'')}`:'Không có lời chào'}</span>{job.mode.include_original_track===true&&<span>Giữ track audio gốc phụ</span>}{job.mode.review_before_render===true&&<span>Duyệt script trước khi ghép</span>}</div>
-    <div className="segments">{segments.length?segments.map(s=><div className="segment" key={s.id}><time>{(s.start_ms/1000).toFixed(1)}s</time><div><p>{s.source_text}</p><textarea value={s.translated_text} readOnly={!editable} aria-label={`Bản dịch đoạn ${s.ordinal+1}`} onFocus={()=>{if(editable)markDirty()}} onChange={e=>{if(!editable)return;markDirty();setSegments(segments.map(x=>x.id===s.id?{...x,translated_text:e.target.value,reading_text:e.target.value}:x))}}/>{s.warnings.length>0&&<small className="warning">{s.warnings.join(' · ')}</small>}</div></div>):<p className="muted">{terminal}</p>}</div>
-    {artifacts.length>0&&<div className="artifact-list">{artifacts.map(a=><a key={a.id} href={`${API}/artifacts/${a.id}`} target="_blank" rel="noreferrer"><DownloadIcon kind={a.kind}/>{a.kind} · {a.path}</a>)}</div>}
+    <div className="segments">{segments.length?segments.map(s=><div className="segment" key={s.id}><time>{formatClock(s.start_ms)}</time><div><p>{s.source_text}</p><textarea value={s.translated_text} readOnly={!editable} aria-label={`Bản dịch đoạn ${s.ordinal+1}`} onFocus={()=>{if(editable)markDirty()}} onChange={e=>{if(!editable)return;markDirty();setSegments(segments.map(x=>x.id===s.id?{...x,translated_text:e.target.value,reading_text:e.target.value}:x))}}/>{s.warnings.length>0&&<small className="warning">{s.warnings.join(' · ')}</small>}</div></div>):<p className="muted">{terminal}</p>}</div>
+    {artifacts.length>0&&<div className="artifact-list">{artifacts.map(a=><a key={a.id} href={`${API}/artifacts/${a.id}`} target="_blank" rel="noreferrer"><DownloadIcon kind={a.kind}/>{a.kind} · {a.path}{a.size_bytes!=null&&` · ${formatBytes(a.size_bytes)}`}</a>)}</div>}
     {segments.length>0&&editable&&<button className="primary save" onClick={save}>{isReview?'Lưu script & tiếp tục ghép video':'Lưu bản dịch & xuất lại'} <ChevronRight size={16}/></button>}
   </div>
 }
@@ -90,19 +91,19 @@ type ApiTotals = { calls:number; prompt_tokens:number; completion_tokens:number;
 type ApiStatus = { at:string; model:string; ok:boolean; error?:string|null; last_error?:string|null; last_error_at?:string|null; rate_limits:Record<string,string> }
 type ApiUsage = { today:ApiTotals; month:ApiTotals; status:ApiStatus|null }
 type ApiTest = { ok:boolean; latency_ms?:number; model?:string; error?:string; rate_limits:Record<string,string>; usage:ApiUsage }
-const compact = (n:number) => n>=1e6 ? `${(n/1e6).toFixed(1)}M` : n>=1e3 ? `${(n/1e3).toFixed(1)}k` : String(n)
 const clock = (iso?:string|null) => iso ? new Date(iso).toLocaleString('vi-VN') : ''
 function rateLimitRows(limits:Record<string,string>) {
   const rows:string[] = []
   for (const [kind,label] of [['requests','lượt gọi'],['tokens','token']]) {
     const remaining=limits[`x-ratelimit-remaining-${kind}`], limit=limits[`x-ratelimit-limit-${kind}`], reset=limits[`x-ratelimit-reset-${kind}`]
-    if (remaining) rows.push(`Còn ${remaining}${limit?` / ${limit}`:''} ${label}${reset?` · hồi lại sau ${reset}`:''}`)
+    if (remaining) rows.push(`Còn ${formatCountText(remaining)}${limit?` / ${formatCountText(limit)}`:''} ${label}${reset?` · hồi lại sau ${formatResetDuration(reset)}`:''}`)
   }
-  if (!rows.length && limits['x-ratelimit-remaining']) rows.push(`Còn ${limits['x-ratelimit-remaining']}${limits['x-ratelimit-limit']?` / ${limits['x-ratelimit-limit']}`:''} lượt gọi`)
+  const remaining=limits['x-ratelimit-remaining'], limit=limits['x-ratelimit-limit']
+  if (!rows.length && remaining) rows.push(`Còn ${formatCountText(remaining)}${limit?` / ${formatCountText(limit)}`:''} lượt gọi`)
   return rows
 }
 function UsageTotals({label,totals}:{label:string;totals:ApiTotals}) {
-  return <div className="usage-box"><span>{label}</span><strong>{compact(totals.total_tokens)} token</strong><small>{totals.calls} lần gọi · vào {compact(totals.prompt_tokens)} / ra {compact(totals.completion_tokens)}</small>{totals.errors>0&&<small className="usage-bad">{totals.errors} lỗi{totals.rate_limited?` · ${totals.rate_limited} lần bị chặn vì giới hạn`:''}</small>}</div>
+  return <div className="usage-box"><span>{label}</span><strong>{formatCount(totals.total_tokens)} token</strong><small>{formatCount(totals.calls)} lần gọi · gửi đi {formatCount(totals.prompt_tokens)} / nhận về {formatCount(totals.completion_tokens)}</small>{totals.errors>0&&<small className="usage-bad">{totals.errors} lỗi{totals.rate_limited?` · ${totals.rate_limited} lần bị chặn vì giới hạn`:''}</small>}</div>
 }
 function ApiUsagePanel({usage,onRefresh}:{usage:ApiUsage|null;onRefresh:()=>void}) {
   const status=usage?.status, limits=rateLimitRows(status?.rate_limits||{})
@@ -125,14 +126,15 @@ function SettingsView({onMessage}:{onMessage:(x:string)=>void}) {
   useEffect(()=>{api('/settings').then(setData).catch(e=>onMessage(e.message)); loadUsage(); const timer=setInterval(loadUsage,15000); return()=>clearInterval(timer)},[])
   if(!data)return <div className="panel empty"><p>Đang tải cài đặt…</p></div>
   const fileGb=data.max_file_gb ?? Math.round(Number(data.max_file_bytes)/GIB*100)/100
+  const durationMinutes=data.max_duration_minutes ?? Math.round(Number(data.max_duration_seconds)/60*10)/10
   const apiFields={api_base_url:String(data.api_base_url||'').trim(),api_model:String(data.api_model||'').trim(),api_key:data.api_key||''}
-  const save=async()=>{setSaving(true);try{const result=await api('/settings',{method:'PATCH',headers:{'X-CSRF-Token':csrf()},body:JSON.stringify({max_file_bytes:Math.round(Number(fileGb)*GIB),max_duration_seconds:Number(data.max_duration_seconds),stable_seconds:Number(data.stable_seconds),cpu_threads:Number(data.cpu_threads),translation_provider:data.translation_provider,...apiFields})});setData(result);onMessage('Đã lưu cài đặt')}catch(e){onMessage((e as Error).message)}finally{setSaving(false)}}
+  const save=async()=>{setSaving(true);try{const result=await api('/settings',{method:'PATCH',headers:{'X-CSRF-Token':csrf()},body:JSON.stringify({max_file_bytes:Math.round(Number(fileGb)*GIB),max_duration_seconds:Math.round(Number(durationMinutes)*60),stable_seconds:Number(data.stable_seconds),cpu_threads:Number(data.cpu_threads),translation_provider:data.translation_provider,...apiFields})});setData(result);onMessage('Đã lưu cài đặt')}catch(e){onMessage((e as Error).message)}finally{setSaving(false)}}
   const testApi=async()=>{setTesting(true);setTest(null);try{const result:ApiTest=await api('/settings/test-api',{method:'POST',headers:{'X-CSRF-Token':csrf()},body:JSON.stringify(apiFields)});setTest(result);setUsage(result.usage)}catch(e){onMessage((e as Error).message)}finally{setTesting(false)}}
   const testLimits=test?rateLimitRows(test.rate_limits):[]
   const showUsage=data.translation_provider==='api'||Boolean(usage?.month.calls)
   return <section className="settings-grid"><div className="panel settings-card"><p className="eyebrow">GIỚI HẠN</p><h2>Hàng đợi & tài nguyên</h2>
-    <label>Dung lượng tối đa mỗi video (GB)<input type="number" min="0.1" step="0.5" value={fileGb} onChange={e=>setData({...data,max_file_gb:e.target.value})}/></label>
-    <label>Thời lượng tối đa (giây)<input type="number" value={data.max_duration_seconds} onChange={e=>setData({...data,max_duration_seconds:e.target.value})}/></label>
+    <label>Dung lượng tối đa mỗi video (GB)<input type="number" min="0.1" step="0.5" value={fileGb} onChange={e=>setData({...data,max_file_gb:e.target.value})}/>{Number(fileGb)>0&&Number(fileGb)<1&&<small className="unit-hint">= {formatBytes(Number(fileGb)*GIB)}</small>}</label>
+    <label>Thời lượng tối đa mỗi video (phút)<input type="number" min="1" step="5" value={durationMinutes} onChange={e=>setData({...data,max_duration_minutes:e.target.value})}/><small className="unit-hint">= {formatDuration(Number(durationMinutes)*60)}</small></label>
     <label>Số luồng CPU<input type="number" min="1" max="64" value={data.cpu_threads} onChange={e=>setData({...data,cpu_threads:e.target.value})}/></label>
     <p className="eyebrow settings-sub">DỊCH THUẬT</p>
     <div className="provider-toggle" role="radiogroup" aria-label="Cách dịch">{[['local','AI local','Ollama + NLLB trên máy này'],['api','API bên ngoài','OpenAI, Gemini, DeepSeek…']].map(([value,title,hint])=><label key={value} className={data.translation_provider===value?'on':''}><input type="radio" name="provider" checked={data.translation_provider===value} onChange={()=>setData({...data,translation_provider:value})}/><strong>{title}</strong><span>{hint}</span></label>)}</div>
@@ -142,7 +144,7 @@ function SettingsView({onMessage}:{onMessage:(x:string)=>void}) {
       <label>Model<input value={data.api_model||''} onChange={e=>setData({...data,api_model:e.target.value})} placeholder="gpt-4o-mini"/></label>
       <label>API key<input type="password" autoComplete="off" value={data.api_key||''} onChange={e=>setData({...data,api_key:e.target.value})} placeholder={data.api_key_set?'Đã lưu · để trống để giữ key cũ':'Dán API key'}/></label>
       <button className="secondary" onClick={testApi} disabled={testing||!(data.api_key||data.api_key_set)}><Activity size={14}/> {testing?'Đang kiểm tra…':'Kiểm tra kết nối'}</button>
-      {test&&(test.ok?<div className="api-test ok">✓ Kết nối được · {test.model} · {test.latency_ms} ms{testLimits.map(row=><span key={row}>{row}</span>)}</div>:<div className="api-test bad"><AlertTriangle size={14}/> {test.error}</div>)}
+      {test&&(test.ok?<div className="api-test ok">✓ Kết nối được · {test.model} · phản hồi trong {formatMs(test.latency_ms ?? 0)}{testLimits.map(row=><span key={row}>{row}</span>)}</div>:<div className="api-test bad"><AlertTriangle size={14}/> {test.error}</div>)}
       <p className="provider-note">Nội dung phụ đề sẽ được gửi tới dịch vụ này. Câu nào API lỗi sẽ tự dịch lại bằng NLLB local. Video đang trong hàng đợi dùng cài đặt mới ở lần dịch kế tiếp.</p></>}
     <button className="primary save" onClick={save} disabled={saving}>{saving?'Đang lưu…':'Lưu thay đổi'}</button></div>
     <div className="panel settings-card"><p className="eyebrow">LOCAL RUNTIME</p><h2>Mô hình & công cụ</h2>{['whisper_model','nllb_model','piper_model','ffmpeg','ffprobe'].map(key=><div className="path-row" key={key}><span>{key}</span><code>{data[key]||'Chưa cấu hình'}</code></div>)}{data.translation_provider==='api'?<div className="offline online"><span className="local-dot"/> Dịch qua API: {data.api_model} · phụ đề được gửi ra ngoài, video và giọng đọc vẫn xử lý local</div>:<div className="offline"><span className="local-dot"/> Offline mode bật · không gửi dữ liệu ra ngoài</div>}</div>

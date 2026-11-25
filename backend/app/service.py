@@ -14,6 +14,7 @@ from pathlib import Path
 from sqlalchemy import func, select, update
 
 from .config import settings
+from .units import format_bytes
 from .db import Job, SessionLocal, WatchFolder, WatchSeen, now
 from .diagnostics import append_json_line, identity_matches, process_identity, resource_snapshot
 from .media import sha256_file
@@ -273,14 +274,14 @@ class QueueSupervisor:
             disk_free = min(int(item["disk_free_bytes"]) for item in snapshots)
             if disk_free < disk_reserve:
                 self._resources_short = True
-                return False, f"disk free {disk_free} bytes is below reserve {disk_reserve}", {
+                return False, f"Ổ đĩa chỉ còn trống {format_bytes(disk_free)}, cần giữ lại ít nhất {format_bytes(disk_reserve)}", {
                     "disk_free_bytes": disk_free, "ram_available_bytes": min(int(item.get("ram_available_bytes", -1)) for item in snapshots),
                 }
             ram_values = [int(item.get("ram_available_bytes", -1)) for item in snapshots if int(item.get("ram_available_bytes", -1)) >= 0]
             if ram_values and min(ram_values) < ram_reserve:
                 self._resources_short = True
                 available = min(ram_values)
-                return False, f"RAM available {available} bytes is below reserve {ram_reserve}", {
+                return False, f"RAM chỉ còn trống {format_bytes(available)}, cần ít nhất {format_bytes(ram_reserve)}", {
                     "disk_free_bytes": disk_free, "ram_available_bytes": available,
                 }
             self._resources_short = False

@@ -41,3 +41,9 @@ def test_paths_are_confined_and_filename_is_sanitized():
     assert confined(root / "nested" / "x.mp4", root).parent.name == "nested"
     with pytest.raises(ValueError): confined(root.parent / "escape.mp4", root)
     assert safe_filename("..\\video:<bad>.mp4") == "video__bad_.mp4"
+
+
+def test_format_bytes_is_human_readable():
+    from backend.app.units import format_bytes
+    assert [format_bytes(value) for value in (512, 1024, 1536, 1024 ** 2, 1024 ** 3, int(1.5 * 1024 ** 3), 20 * 1024 ** 3)] == \
+        ["512 B", "1 KB", "1,5 KB", "1 MB", "1 GB", "1,5 GB", "20 GB"]
