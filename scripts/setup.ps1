@@ -121,4 +121,5 @@ if ($LASTEXITCODE -ne 0) { throw 'runtime manifest creation failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Python dependency consistency check failed' }
 Write-Host "Installed Video Auto. Environment: $EnvFile"
 Write-Host "Managed runtime: $($Imported.runtime_root)"
-Write-Host 'Run scripts\start.ps1 to launch the local service.'
+& (Join-Path $PSScriptRoot 'create-shortcuts.ps1')
+Write-Host 'Open Video Auto from the Desktop or Start menu shortcut.'

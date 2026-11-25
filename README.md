@@ -98,6 +98,22 @@ không lặp vô hạn. Chạy bằng `start.ps1` mặc định chống ngủ t�
 Artifact đã hoàn tất giữ trust root tuyệt đối của lần xuất. Vì vậy đổi
 `output_root` sau khi queue rảnh không làm mất khả năng tải artifact cũ.
 
+## Mở app bằng một cú nhấp
+
+`setup.ps1` tạo sẵn lối tắt **Video Auto** trên Desktop và trong Start menu.
+Nhấp đúp là app tự bật Ollama, máy chủ local và mở trình duyệt; trong lúc chờ
+sẽ có trang "Đang khởi động". Nếu app đang chạy, lối tắt chỉ mở trình duyệt.
+Lối tắt **Dung Video Auto** (Desktop và Start menu) tắt hết: máy chủ, worker
+đang chạy và Ollama. Dòng lệnh tương đương là `.\scripts\stop.ps1 -All`;
+bỏ `-All` thì Ollama vẫn chạy. Nếu đã cài Scheduled Task ở mục dưới, task sẽ
+bật lại máy chủ sau vài phút, nên gỡ task trước khi muốn tắt lâu dài.
+
+Tạo lại lối tắt (ví dụ sau khi chuyển thư mục dự án):
+
+```powershell
+.\scripts\create-shortcuts.ps1
+```
+
 ## Khởi động cùng Windows
 
 Sau khi đã kiểm tra ứng dụng thủ công, đăng ký Scheduled Task bằng PowerShell
