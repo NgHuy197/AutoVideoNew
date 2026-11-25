@@ -4,6 +4,7 @@ import SubtitleStyleEditor from './SubtitleStyleEditor'
 import { DEFAULT_SUBTITLE_STYLE, normalizeSubtitleStyle } from './subtitleStyle'
 import FolderPicker, { normalizeFolder } from './FolderPicker'
 import { DEFAULT_GREETING, readSharedOptions, writeSharedOptions } from './sharedOptions'
+import { formatBytes } from './units'
 import {
   api,
   csrf,
@@ -594,7 +595,7 @@ export default function UploadButton({ onDone, onError, onClearError, visible, o
         return <div className="upload-item" key={item.key}>
           <div className="upload-item-head"><div className="upload-item-name" title={item.file.name}>{item.file.name}</div><span className={`upload-item-status ${item.status}`}>{item.status === 'uploading' && <LoaderCircle size={13} className="spin" />}{item.status === 'completed' && <Check size={13} />}{item.status === 'error' && <CircleAlert size={13} />}{statusLabel(item)}</span></div>
           <div className="upload-progress" role="progressbar" aria-label={`Tiến độ ${item.file.name}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><i style={{ width: `${progress}%` }} /></div>
-          {item.status === 'uploading' && <div className="upload-percent">{progress}%</div>}
+          {item.status === 'uploading' && <div className="upload-percent">{item.session ? `${formatBytes(receivedBytes(item.received, item.file.size, item.session.chunkSize))} / ` : ''}{formatBytes(item.file.size)} · {progress}%</div>}
           {item.note && <div className="upload-note">{item.note}</div>}
           {item.error && <div className="upload-error"><CircleAlert size={13} />{item.error}<button className="upload-retry" onClick={() => retry(item)}><RotateCcw size={13} /> Thử lại</button></div>}
           {item.status !== 'completed' && item.status !== 'error' && item.status !== 'cancelled' && <button className="upload-cancel" onClick={() => cancelItem(item)}><X size={13} /> Hủy tải lên</button>}

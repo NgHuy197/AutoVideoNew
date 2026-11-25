@@ -11,6 +11,7 @@ import subprocess
 import time
 from urllib.request import ProxyHandler, Request, build_opener
 
+from .api_usage import PERMANENT_ERRORS, ApiCall, describe_error, rate_limit_headers
 from .config import settings
 from .media import MediaError
 
@@ -198,6 +199,14 @@ class OllamaTranslator:
         with _opener().open(request, timeout=timeout_seconds) as response:
             return str(json.load(response)["message"]["content"])
 
+    def _recover(self) -> bool:
+        # A server started by the previous job's worker dies with it, so start
+        # one again before giving the batch to NLLB.
+        return ollama_ready(self.model)
+
+    def _fallback_warning(self) -> str:
+        return "Câu này dịch bằng NLLB dự phòng"
+
     def _nllb(self) -> NLLBTranslator:
         if self._fallback is None: self._fallback = self._load_fallback()
         return self._fallback
@@ -240,8 +249,10 @@ class OllamaTranslator:
             if not missing: break
             try:
                 found = self._attempt([texts[index] for index in missing], per_call, retry=attempt > 0)
-            except (OSError, ValueError, KeyError, TypeError):
-                break
+            except (OSError, ValueError, KeyError, TypeError, IndexError):
+                if not self._recover():
+                    break
+                continue
             done.update({missing[index]: text for index, text in found.items()})
             missing = [index for index in missing if index not in done]
         rows: list[Translation | None] = [None] * len(texts)
@@ -252,7 +263,7 @@ class OllamaTranslator:
             fallback = self._nllb().translate_batch([texts[index] for index in missing], source_code,
                                                     timeout_seconds=timeout_seconds)
             for index, row in zip(missing, fallback):
-                rows[index] = Translation(row.text, row.source_code, "Câu này dịch bằng NLLB dự phòng")
+                rows[index] = Translation(row.text, row.source_code, self._fallback_warning())
         self._recent = (self._recent + [row.text for row in rows])[-CONTEXT_LINES:]
         return rows
 
@@ -263,6 +274,76 @@ class OllamaTranslator:
             _opener().open(Request(f"{OLLAMA_URL}/api/generate", body, {"Content-Type": "application/json"}), timeout=10).close()
         except OSError:
             pass
+
+
+class ApiTranslator(OllamaTranslator):
+    """The same prompts and checks, sent to an OpenAI-compatible chat API.
+
+    Works with OpenAI, Gemini (OpenAI endpoint), DeepSeek, OpenRouter, Groq and
+    any server exposing ``/chat/completions``. NLLB still covers failed lines.
+    Every call is reported to ``on_call`` for usage and rate-limit tracking.
+    """
+
+    MAX_RATE_LIMIT_WAIT = 20
+
+    def __init__(self, base_url: str, api_key: str, model: str, load_fallback: Callable[[], NLLBTranslator],
+                 on_call: Callable[[ApiCall], None] | None = None):
+        super().__init__(model, load_fallback)
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self._on_call = on_call
+        self.last_call: ApiCall | None = None
+
+    def _request(self, messages: list[dict], timeout_seconds: float, temperature: float) -> str:
+        body = json.dumps({"model": self.model, "temperature": temperature, "messages": messages}).encode("utf-8")
+        request = Request(f"{self.base_url}/chat/completions", body,
+                          {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"})
+        call = ApiCall(model=self.model)
+        try:
+            # External calls honour the system proxy, unlike loopback Ollama calls.
+            with build_opener().open(request, timeout=timeout_seconds) as response:
+                call.rate_limits = rate_limit_headers(getattr(response, "headers", None))
+                data = json.load(response)
+            usage = data.get("usage") or {}
+            call.prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            call.completion_tokens = int(usage.get("completion_tokens") or 0)
+            return str(data["choices"][0]["message"]["content"])
+        except Exception as exc:
+            call.error_kind, call.error = describe_error(exc)
+            call.rate_limits = call.rate_limits or rate_limit_headers(getattr(exc, "headers", None))
+            raise
+        finally:
+            self.last_call = call
+            if self._on_call:
+                try: self._on_call(call)
+                except Exception: pass  # tracking must never fail a translation
+
+    def _chat(self, prompt: str, timeout_seconds: float, temperature: float = 0.2) -> str:
+        return self._request([{"role": "system", "content": LLM_SYSTEM_PROMPT},
+                              {"role": "user", "content": prompt}], timeout_seconds, temperature)
+
+    def ping(self, timeout_seconds: float = 30) -> str:
+        """A minimal call to check the address, key and model."""
+        return self._request([{"role": "user", "content": "Trả lời đúng một từ: OK"}], timeout_seconds, 0)
+
+    def _recover(self) -> bool:
+        call = self.last_call
+        if call is None or call.error_kind in PERMANENT_ERRORS:
+            return False  # a wrong key or empty balance fails again
+        if call.error_kind == "rate_limit":
+            try: wait = float(call.rate_limits.get("retry-after", 5))
+            except ValueError: wait = 5
+            time.sleep(min(max(wait, 1), self.MAX_RATE_LIMIT_WAIT))
+        return True
+
+    def _fallback_warning(self) -> str:
+        call = self.last_call
+        if call is not None and call.error:
+            return f"{call.error}. Câu này dịch bằng NLLB dự phòng"
+        return super()._fallback_warning()
+
+    def close(self) -> None:
+        pass
 
 
 def split_for_translation(text: str, tokenizer, max_tokens: int = 480) -> list[str]:

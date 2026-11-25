@@ -177,6 +177,17 @@ class Setting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
 
+class ApiUsage(Base):
+    """Per-day counters for the external translation API (local calendar day)."""
+    __tablename__ = "api_usage"
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[int] = mapped_column(Integer, default=0)
+    rate_limited: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class Event(Base):
     __tablename__ = "events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -233,6 +244,8 @@ def init_db() -> None:
         if key in {"output_root", "max_file_bytes", "max_duration_seconds", "stable_seconds", "cpu_threads"}:
             if key == "output_root": setattr(settings, key, Path(str(value)).resolve())
             else: setattr(settings, key, int(value))
+        elif key in {"translation_provider", "api_base_url", "api_key", "api_model"}:
+            setattr(settings, key, str(value))
     # Backfill immutable job snapshots after persisted global settings have
     # been applied.  This gives legacy rows the settings that were in force at
     # the first upgrade and keeps later edits from changing those rows.

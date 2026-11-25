@@ -172,6 +172,25 @@ def test_clear_completed_removes_only_finished_jobs_and_their_rows(queue_db):
     assert api.clear_completed_jobs() == {"deleted": 0, "media_preserved": True}
 
 
+def test_clear_all_removes_queue_except_running_jobs(queue_db):
+    sessions, source_id = queue_db
+    removable = {_add_job(sessions, source_id, status) for status in
+                 ("QUEUED", "PAUSED", "FAILED", "DRAFT", "COMPLETED", "WAITING_RESOURCES")}
+    running = {_add_job(sessions, source_id, status) for status in ("RUNNING", "PAUSING", "CANCELLING")}
+    with sessions() as session:
+        session.add(Segment(job_id=next(iter(removable)), ordinal=0, start_ms=0, end_ms=1000, source_text="hi"))
+        session.get(Job, next(iter(running))).parent_job_id = next(iter(removable))
+        session.commit()
+
+    assert api.clear_all_jobs() == {"deleted": 6, "kept_running": 3, "media_preserved": True}
+
+    with sessions() as session:
+        assert set(session.scalars(select(Job.id))) == running
+        assert session.get(Job, next(iter(running))).parent_job_id is None
+        assert not list(session.scalars(select(Segment)))
+    assert api.clear_all_jobs() == {"deleted": 0, "kept_running": 3, "media_preserved": True}
+
+
 def test_delete_job_refuses_running_and_unknown_jobs(queue_db):
     sessions, source_id = queue_db
     running_id = _add_job(sessions, source_id, "RUNNING")

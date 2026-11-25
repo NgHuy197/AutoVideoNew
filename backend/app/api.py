@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import time
@@ -11,7 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Cookie, Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -19,7 +20,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy import delete, func, select, update
 
+from .api_usage import record_call, usage_summary
 from .config import settings
+from .units import format_bytes
+from .translate import ApiTranslator
 from .db import Artifact, Event, Job, Preset, Segment, SessionLocal, Source, StageRun, Upload, WatchFolder, Setting, init_db, json_text, now
 from .media import MediaError, sha256_file
 from .paths import confined, safe_filename
@@ -99,6 +103,11 @@ class SettingsPatch(BaseModel):
     max_duration_seconds: int | None = Field(default=None, ge=1)
     stable_seconds: int | None = Field(default=None, ge=1)
     cpu_threads: int | None = Field(default=None, ge=1, le=64)
+    translation_provider: Literal["local", "api"] | None = None
+    api_base_url: str | None = Field(default=None, pattern=r"^https?://\S+$", max_length=500)
+    # Empty keeps the saved key; the key is never sent back to the browser.
+    api_key: str | None = Field(default=None, max_length=500)
+    api_model: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 DEFAULT_GREETING = "Hallo allemaal, welkom!"
@@ -188,7 +197,7 @@ def _normalize_preset(preset: dict | None) -> dict[str, Any]:
 def create_source_and_job(path: Path, preset: dict | None, watch_folder_id: str | None = None, original_name: str | None = None,
                           expected_sha256: str | None = None, upload_id: str | None = None) -> tuple[Source, Job]:
     path = path.resolve(); size = path.stat().st_size
-    if size > settings.max_file_bytes: raise ValueError("file exceeds configured size limit")
+    if size > settings.max_file_bytes: raise ValueError(f"Video nặng {format_bytes(size)}, vượt giới hạn {format_bytes(settings.max_file_bytes)}")
     digest = sha256_file(path)
     if expected_sha256 and not secrets.compare_digest(digest, expected_sha256):
         raise ValueError("source changed while it was being stabilized")
@@ -320,10 +329,13 @@ def diagnostics():
 @router.post("/uploads")
 def create_upload(payload: dict, _: None = Depends(_csrf)):
     filename = safe_filename(str(payload.get("filename", "video"))); total = int(payload.get("total_bytes", 0))
-    if total <= 0 or total > settings.max_file_bytes: raise HTTPException(413, "invalid upload size")
+    if total <= 0: raise HTTPException(413, "invalid upload size")
+    if total > settings.max_file_bytes:
+        raise HTTPException(413, f"Video nặng {format_bytes(total)}, vượt giới hạn {format_bytes(settings.max_file_bytes)}. Tăng giới hạn trong Cài đặt nếu cần.")
     try:
         if shutil.disk_usage(settings.data_root).free < settings.min_free_bytes + total:
-            raise HTTPException(507, "not enough free disk space for this upload")
+            free = shutil.disk_usage(settings.data_root).free
+            raise HTTPException(507, f"Ổ đĩa chỉ còn trống {format_bytes(free)}, không đủ cho video {format_bytes(total)} (cần giữ lại {format_bytes(settings.min_free_bytes)})")
     except OSError as exc:
         raise HTTPException(503, f"cannot inspect free disk space: {exc}") from exc
     upload_id = secrets.token_hex(16); path = settings.inbox_root / f"{upload_id}.partial"; path.parent.mkdir(parents=True, exist_ok=True)
@@ -576,16 +588,19 @@ def _delete_job_rows(session, job_ids: list[str]) -> None:
     session.execute(update(Upload).where(Upload.completed_job_id.in_(job_ids)).values(completed_job_id=None))
 
 
+REMOVABLE_STATUSES = (
+    "QUEUED", "RETRY_WAIT", "WAITING_RESOURCES", "PAUSED", "DRAFT", "FAILED", "CANCELLED",
+    "COMPLETED", "COMPLETED_WITH_WARNINGS", "SKIPPED_NO_AUDIO", "SKIPPED_NO_SPEECH",
+)
+RUNNING_STATUSES = ("RUNNING", "PAUSING", "CANCELLING")
+
+
 @router.delete("/jobs/{job_id}")
 def delete_job(job_id: str, _: None = Depends(_csrf)):
-    removable_statuses = (
-        "QUEUED", "RETRY_WAIT", "WAITING_RESOURCES", "PAUSED", "DRAFT", "FAILED", "CANCELLED",
-        "COMPLETED", "COMPLETED_WITH_WARNINGS", "SKIPPED_NO_AUDIO", "SKIPPED_NO_SPEECH",
-    )
     with SessionLocal() as session:
         # The status predicate makes removal race-safe with the dispatcher: if
         # it claims a queued row first, the DELETE cannot remove the running job.
-        result = session.execute(delete(Job).where(Job.id == job_id, Job.status.in_(removable_statuses)))
+        result = session.execute(delete(Job).where(Job.id == job_id, Job.status.in_(REMOVABLE_STATUSES)))
         if result.rowcount != 1:
             session.rollback()
             job = session.get(Job, job_id)
@@ -779,6 +794,24 @@ def clear_completed_jobs(_: None = Depends(_csrf)):
         return {"deleted": len(job_ids), "media_preserved": True}
 
 
+@router.post("/queue/clear-all")
+def clear_all_jobs(_: None = Depends(_csrf)):
+    """Remove every job except those currently running; media is preserved."""
+    with SessionLocal() as session:
+        candidate_ids = list(session.scalars(select(Job.id).where(Job.status.in_(REMOVABLE_STATUSES))))
+        removed: list[str] = []
+        if candidate_ids:
+            # Same race-safe predicate as delete_job: a row the dispatcher claims
+            # after the SELECT is not deleted, so its child rows are kept too.
+            session.execute(delete(Job).where(Job.id.in_(candidate_ids), Job.status.in_(REMOVABLE_STATUSES)))
+            still_present = set(session.scalars(select(Job.id).where(Job.id.in_(candidate_ids))))
+            removed = [job_id for job_id in candidate_ids if job_id not in still_present]
+            _delete_job_rows(session, removed)
+        kept_running = session.scalar(select(func.count()).select_from(Job).where(Job.status.in_(RUNNING_STATUSES))) or 0
+        session.commit()
+        return {"deleted": len(removed), "kept_running": kept_running, "media_preserved": True}
+
+
 @router.get("/jobs/{job_id}/segments")
 def get_segments(job_id: str):
     with SessionLocal() as session:
@@ -932,7 +965,14 @@ def download_artifact(artifact_id: str, request: Request):
 
 
 @router.get("/events")
-async def events(after_id: int = 0):
+async def events(request: Request, after_id: int | None = None):
+    # Resume from Last-Event-ID after a reconnect; a fresh page starts at the newest event
+    # instead of replaying the whole history, which flooded the browser with refreshes.
+    if after_id is None:
+        last = request.headers.get("last-event-id", "")
+        if last.isdigit(): after_id = int(last)
+        else:
+            with SessionLocal() as session: after_id = session.scalar(select(func.max(Event.id))) or 0
     async def stream():
         current = after_id
         for _ in range(120):
@@ -1004,12 +1044,19 @@ def add_storage_folder(payload: StorageFolderCreate, _: None = Depends(_csrf)):
 
 
 @router.get("/settings")
-def get_settings(): return settings.manifest() | {"max_file_bytes": settings.max_file_bytes, "max_duration_seconds": settings.max_duration_seconds, "stable_seconds": settings.stable_seconds, "cpu_threads": settings.cpu_threads}
+def get_settings(): return settings.manifest() | {"max_file_bytes": settings.max_file_bytes, "max_duration_seconds": settings.max_duration_seconds, "stable_seconds": settings.stable_seconds, "cpu_threads": settings.cpu_threads,
+                                                  "translation_provider": settings.translation_provider, "api_base_url": settings.api_base_url,
+                                                  "api_model": settings.api_model, "api_key_set": bool(settings.api_key),
+                                                  "local_translation_model": settings.translation_model}
 
 
 @router.patch("/settings")
 def patch_settings(payload: SettingsPatch, _: None = Depends(_csrf)):
     values = payload.model_dump(exclude_none=True)
+    if not (values.get("api_key") or "").strip(): values.pop("api_key", None)
+    else: values["api_key"] = values["api_key"].strip()
+    if values.get("translation_provider") == "api" and not (values.get("api_key") or settings.api_key):
+        raise HTTPException(422, "Nhập API key trước khi bật dịch bằng API")
     active_statuses = {"QUEUED", "RUNNING", "RETRY_WAIT", "PAUSED", "PAUSING", "CANCELLING", "WAITING_RESOURCES"}
     if {key for key in values if key in {"data_root", "output_root"}}:
         with SessionLocal() as session:
@@ -1033,6 +1080,37 @@ def patch_settings(payload: SettingsPatch, _: None = Depends(_csrf)):
         for key, value in values.items(): session.merge(Setting(key=key, value_json=json_text(str(value) if isinstance(value, Path) else value)))
         session.commit()
     settings.ensure_dirs(); return get_settings()
+
+
+class ApiTestRequest(BaseModel):
+    # Unsaved form values; anything left empty uses the saved setting.
+    api_base_url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
+    api_model: str | None = Field(default=None, max_length=200)
+
+
+@router.get("/api-usage")
+def get_api_usage(): return usage_summary()
+
+
+@router.post("/settings/test-api")
+def test_api(payload: ApiTestRequest, _: None = Depends(_csrf)):
+    base_url = (payload.api_base_url or "").strip() or settings.api_base_url
+    key = (payload.api_key or "").strip() or settings.api_key
+    model = (payload.api_model or "").strip() or settings.api_model
+    if not key: raise HTTPException(422, "Chưa có API key")
+    if not re.match(r"^https?://\S+$", base_url): raise HTTPException(422, "Địa chỉ API không hợp lệ")
+    client = ApiTranslator(base_url, key, model, lambda: None, on_call=record_call)
+    started = time.monotonic()
+    try:
+        reply = client.ping()
+    except Exception:
+        call = client.last_call
+        return {"ok": False, "error": call.error if call else "Không gọi được API", "error_kind": call.error_kind if call else None,
+                "rate_limits": call.rate_limits if call else {}, "usage": usage_summary()}
+    call = client.last_call
+    return {"ok": True, "model": model, "latency_ms": round((time.monotonic() - started) * 1000), "reply": reply.strip()[:80],
+            "rate_limits": call.rate_limits if call else {}, "usage": usage_summary()}
 
 
 def create_app() -> FastAPI:

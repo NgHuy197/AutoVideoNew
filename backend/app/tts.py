@@ -114,8 +114,29 @@ class PiperSynthesizer:
         partial = _unique_partial(output)
         try:
             import wave
-            with wave.open(str(partial), "wb") as handle:
-                self._load_voice().synthesize_wav(text, handle)
+            voice = self._load_voice()
+            # Write chunks ourselves: synthesize_wav leaves the WAV format unset when Piper
+            # yields no audio, and closing that file then fails with "# channels not specified".
+            handle = wave.open(str(partial), "wb")
+            try:
+                chunks = 0
+                for chunk in voice.synthesize(text):
+                    if chunks == 0:
+                        handle.setframerate(chunk.sample_rate)
+                        handle.setsampwidth(chunk.sample_width)
+                        handle.setnchannels(chunk.sample_channels)
+                    handle.writeframes(chunk.audio_int16_bytes)
+                    chunks += 1
+                if chunks == 0:
+                    if any(ch.isalnum() for ch in text):
+                        raise MediaError(f"Piper produced no audio for text: {text[:80]!r}")
+                    # Punctuation-only text has nothing to speak: keep a short pause instead.
+                    handle.setframerate(voice.config.sample_rate)
+                    handle.setsampwidth(2)
+                    handle.setnchannels(1)
+                    handle.writeframes(b"\x00\x00" * int(voice.config.sample_rate * 0.4))
+            finally:
+                handle.close()
             if not _valid_wav(partial): raise MediaError("Piper produced invalid audio")
             os.replace(partial, output)
             if cached is not None:

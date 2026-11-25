@@ -1,3 +1,5 @@
+# -All also stops Ollama (server, tray app and model runners), which open-app.ps1 starts.
+param([switch]$All)
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $EnvFile = Join-Path (Join-Path $ProjectRoot '.runtime') 'videoauto.env'
@@ -26,3 +28,10 @@ if (!$processes) {
 foreach ($process in $processes) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
 if ($processes) { Write-Host "Stopped Video Auto supervisor, API, and owned worker trees." }
 else { Write-Host "Video Auto supervisor is not running." }
+if ($All) {
+    # The tray app restarts the server, so stop it together with the server and runners.
+    $ollama = @(Get-Process | Where-Object { $_.Name -like 'ollama*' })
+    # Runners are separate ollama* processes too, so matching by name covers them.
+    $ollama | Stop-Process -Force -ErrorAction SilentlyContinue
+    if ($ollama) { Write-Host "Stopped Ollama." } else { Write-Host "Ollama is not running." }
+}

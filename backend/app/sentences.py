@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 
+from .vi_compounds import COMPOUNDS
+
 # Whisper writes non-speech as "(scissors snipping)", "[music]" or "♪ ... ♪".
 _SOUND_TAG = re.compile(r"\([^()]*\)|\[[^\[\]]*\]|[♪♫]+[^♪♫]*[♪♫]+|[♪♫]+")
 _HAS_WORD = re.compile(r"\w")
@@ -17,6 +19,38 @@ _UNSPACED_SCRIPT = re.compile(r"[぀-ヿ㐀-鿿]")
 MAX_GROUP_CUES = 8
 MAX_GAP_MS = 2000
 SNAP_WORDS = 3
+
+# Vietnamese writes each syllable as its own word, so a break between any two
+# words may cut a compound ("báo | cáo"). Without a dictionary, prefer breaks
+# beside function words, which rarely sit inside a compound.
+_CLAUSE_STARTERS = frozenset("và nhưng thì mà để vì nên khi nếu rằng hoặc hay còn bởi do tuy dù mặc nhờ".split())
+_PREPOSITIONS = frozenset("của cho với từ về ở tại trong trên dưới theo bằng như là".split())
+_BINDS_NEXT = _CLAUSE_STARTERS | _PREPOSITIONS | frozenset(
+    "các những một mọi mỗi từng rất quá đã đang sẽ vừa không chưa chẳng đều cũng vẫn "
+    "được bị hãy đừng cái con chiếc sự việc cuộc có".split())
+# Particles that close the phrase before them ("kiếm được", "tốt hơn").
+_BINDS_PREVIOUS = frozenset("được rồi nữa lắm đâu ạ nhé thôi hơn nhất".split())
+_QUOTES = "\"'“”‘’()"
+
+
+def break_cost(left: str, right: str) -> int:
+    """How badly a line or cue break between two words hurts reading (0 best)."""
+    if _SENTENCE_END.search(left):
+        return 0
+    if _CLAUSE_END.search(left):
+        return 1
+    tail, head = left.lower().strip(_QUOTES), right.lower().strip(_QUOTES).rstrip(",;:.!?…")
+    if (tail, head) in COMPOUNDS:
+        return 10
+    if tail in _BINDS_NEXT:
+        return 9
+    if head in _BINDS_PREVIOUS:
+        return 8
+    if head in _CLAUSE_STARTERS:
+        return 2
+    if head in _PREPOSITIONS:
+        return 3
+    return 6
 
 
 def strip_sound_tags(text: str) -> str:
@@ -80,9 +114,10 @@ def distribute(translated: str, weights: list[int]) -> list[str]:
         high = max(low, len(words) - remaining_cues)
         target = max(low, min(target, high))
         # Prefer ending a cue where the translation pauses naturally.
-        near = sorted(range(max(low, target - SNAP_WORDS), min(high, target + SNAP_WORDS) + 1),
-                      key=lambda value: abs(value - target))
-        target = next((value for value in near if _CLAUSE_END.search(words[value - 1])), target)
+        near = range(max(low, target - SNAP_WORDS), min(high, target + SNAP_WORDS) + 1)
+        target = min(near, key=lambda value: (
+            2 * break_cost(words[value - 1], words[value]) + abs(value - target)
+            if 0 < value < len(words) else 99, abs(value - target)), default=target)
         parts.append(" ".join(words[cursor:target]))
         cursor = target
     parts.append(" ".join(words[cursor:]))

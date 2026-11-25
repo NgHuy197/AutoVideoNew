@@ -18,7 +18,8 @@ from .media import MediaError, extract_audio, run_command, sha256_file, validate
 from .renderer import build_voice_track, render_video
 from .sentences import distribute, group_cues, looks_truncated, split_sentences, strip_sound_tags
 from .storage_folders import folder_path
-from .translate import NLLBTranslator, OllamaTranslator, ollama_ready
+from .api_usage import record_call
+from .translate import ApiTranslator, NLLBTranslator, OllamaTranslator, ollama_ready
 from .tts import PiperSynthesizer, fit_to_slot
 
 
@@ -141,7 +142,9 @@ def _load_nllb() -> NLLBTranslator:
 
 
 def _make_translator():
-    """Prefer the context-aware local LLM; NLLB covers a missing Ollama or model."""
+    """Use the external API when chosen, else the local LLM; NLLB covers the rest."""
+    if settings.translation_provider == "api" and settings.api_key and settings.api_model:
+        return ApiTranslator(settings.api_base_url, settings.api_key, settings.api_model, _load_nllb, on_call=record_call)
     model = settings.translation_model
     if model and ollama_ready(model):
         return OllamaTranslator(model, _load_nllb)
@@ -301,7 +304,8 @@ class Pipeline:
                 for item, part in zip(group, distribute(joined, [len(text) for text in texts])):
                     item.translated_text = part
                     if notes:
-                        item.warning_json = json_text(item.warnings + notes)
+                        # Every NLLB sentence in a group carries the same note.
+                        item.warning_json = json_text(list(dict.fromkeys(item.warnings + notes)))
                     if not item.reading_text:
                         item.reading_text = part
             # _stage(COMPLETED) performs the lease assertion and commits both

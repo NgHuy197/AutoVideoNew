@@ -66,6 +66,18 @@ def build_voice_track(segments: list, duration_ms: int, destination: Path) -> Pa
     run_command([str(settings.ffmpeg), "-y", "-f", "concat", "-safe", "0", "-i", str(manifest), "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-f", "wav", str(partial)], timeout=900)
     if not partial.exists(): raise MediaError("voice track was not created")
     measured = round(audio_duration(partial) * 1000)
+    # Consecutive slots can overlap by a few tens of ms (each slot is placed at the
+    # previous slot's end), so the concatenated track may run slightly past the video.
+    # Trim or pad that small drift to the exact length; a large gap is a real error.
+    if abs(measured - duration_ms) > 1000: raise MediaError(f"voice track duration mismatch ({measured}ms vs {duration_ms}ms)")
+    if measured != duration_ms:
+        trimmed = destination.with_suffix(destination.suffix + ".fit.partial")
+        if trimmed.exists(): trimmed.unlink()
+        run_command([str(settings.ffmpeg), "-y", "-i", str(partial), "-af", "apad", "-t", f"{duration_ms / 1000:.6f}",
+                     "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", "-f", "wav", str(trimmed)], timeout=900)
+        if not trimmed.exists(): raise MediaError("voice track could not be fitted to the video length")
+        partial.unlink(missing_ok=True); trimmed.replace(partial)
+        measured = round(audio_duration(partial) * 1000)
     if abs(measured - duration_ms) > 40: raise MediaError(f"voice track duration mismatch ({measured}ms vs {duration_ms}ms)")
     partial.replace(destination); return destination
 
