@@ -52,6 +52,12 @@ class AppSettings:
     partial_upload_retention_hours: int = 24
     watch_queue_limit: int = 100
     watch_batch_size: int = 4
+    # "local" uses Ollama/NLLB on this machine; "api" sends subtitle text to an
+    # OpenAI-compatible chat API chosen by the user in Settings.
+    translation_provider: str = "local"
+    api_base_url: str = "https://api.openai.com/v1"
+    api_key: str = ""
+    api_model: str = "gpt-4o-mini"
 
     def __post_init__(self) -> None:
         self.data_root = self.data_root.resolve()
@@ -127,7 +133,9 @@ class AppSettings:
                 "backup_retention_days": int(self.backup_retention_days),
                 "partial_upload_retention_hours": int(self.partial_upload_retention_hours),
             },
-            "offline": True,
+            "translation": {"provider": self.translation_provider,
+                            "model": self.api_model if self.translation_provider == "api" else self.translation_model},
+            "offline": self.translation_provider != "api",
         }
 
 

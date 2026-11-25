@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 
 from backend.app import pipeline, translate
 from backend.app.translate import OllamaTranslator, Translation
@@ -101,7 +102,18 @@ def test_persistent_failure_falls_back_to_nllb_with_a_warning():
     assert fallback.calls == [["Bad"]]
 
 
-def test_server_error_falls_back_for_the_whole_batch():
+def test_dropped_server_is_restarted_before_falling_back(monkeypatch):
+    monkeypatch.setattr(translate, "ollama_ready", lambda _model: True)
+    item, _ = translator([ConnectionResetError("closed"), "1. Một\n2. Hai"])
+
+    rows = item.translate_batch(["One", "Two"], "en")
+
+    assert [row.text for row in rows] == ["Một", "Hai"]
+    assert all(row.warning is None for row in rows)
+
+
+def test_server_error_falls_back_for_the_whole_batch(monkeypatch):
+    monkeypatch.setattr(translate, "ollama_ready", lambda _model: False)
     item, _ = translator([OSError("refused")])
 
     assert [row.text for row in item.translate_batch(["One", "Two"], "en")] == ["nllb:One", "nllb:Two"]
@@ -145,3 +157,56 @@ def test_ollama_ready_without_server_or_binary(monkeypatch):
     monkeypatch.setattr(translate, "_ollama_models", down)
     monkeypatch.setattr(translate, "_find_ollama", lambda: None)
     assert not translate.ollama_ready("qwen2.5:7b")
+
+
+def test_pipeline_uses_external_api_when_chosen(monkeypatch):
+    from backend.app.config import settings
+    from backend.app.translate import ApiTranslator
+    monkeypatch.setattr(pipeline, "_load_nllb", lambda: "nllb")
+    monkeypatch.setattr(settings, "translation_provider", "api")
+    monkeypatch.setattr(settings, "api_model", "gpt-test")
+    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setenv("VIDEOAUTO_TRANSLATION_MODEL", "")
+    assert pipeline._make_translator() == "nllb"  # no key: stay local
+    monkeypatch.setattr(settings, "api_key", "sk-test")
+    item = pipeline._make_translator()
+    assert isinstance(item, ApiTranslator) and item.model == "gpt-test"
+
+
+def test_api_translator_sends_openai_request_and_falls_back(monkeypatch):
+    import io
+    from backend.app.translate import ApiTranslator
+    sent = []
+
+    class Opener:
+        def open(self, request, timeout):
+            sent.append(request)
+            if len(sent) == 1: raise OSError("rate limited")
+            return io.BytesIO(json.dumps({"choices": [{"message": {"content": "1. Xin chào."}}]}).encode())
+
+    monkeypatch.setattr(translate, "build_opener", lambda *a: Opener())
+    item = ApiTranslator("https://api.example.test/v1/", "sk-test", "gpt-test", lambda: FakeNllb())
+    rows = item.translate_batch(["Hello."], "en")
+    assert rows[0].text == "Xin chào."
+    assert sent[1].full_url == "https://api.example.test/v1/chat/completions"
+    assert sent[1].get_header("Authorization") == "Bearer sk-test"
+    assert json.loads(sent[1].data)["model"] == "gpt-test"
+
+
+def test_settings_keep_api_key_server_side(monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+    from backend.app import api
+    from backend.app.db import init_db
+    init_db()
+    for key in ("translation_provider", "api_base_url", "api_key", "api_model"):
+        monkeypatch.setattr(api.settings, key, getattr(api.settings, key))
+    monkeypatch.setattr(api.settings, "api_key", "")
+    with pytest.raises(HTTPException):
+        api.patch_settings(api.SettingsPatch(translation_provider="api"), None)
+    result = api.patch_settings(api.SettingsPatch(translation_provider="api", api_key=" sk-secret ", api_model="gpt-test"), None)
+    assert result["api_key_set"] and "sk-secret" not in json.dumps(result)
+    # An empty key field on a later save keeps the stored key.
+    api.patch_settings(api.SettingsPatch(api_key="", api_model="gpt-other"), None)
+    assert api.settings.api_key == "sk-secret" and api.settings.api_model == "gpt-other"
+    api.patch_settings(api.SettingsPatch(translation_provider="local"), None)
