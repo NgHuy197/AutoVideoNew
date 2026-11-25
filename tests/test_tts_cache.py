@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,9 +22,16 @@ def _duration_from_wave(path: Path) -> float:
 
 
 class _FakeVoice:
-    def synthesize_wav(self, _text: str, handle) -> None:
-        handle.setnchannels(1); handle.setsampwidth(2); handle.setframerate(48_000)
-        handle.writeframes(b"\x01\x00" * 4_800)
+    """Mimics Piper's chunk API: ``synthesize`` yields AudioChunk-like objects."""
+    config = SimpleNamespace(sample_rate=48_000)
+
+    def __init__(self, chunks: int = 2):
+        self.chunks = chunks
+
+    def synthesize(self, _text: str):
+        for _ in range(self.chunks):
+            yield SimpleNamespace(sample_rate=48_000, sample_width=2, sample_channels=1,
+                                  audio_int16_bytes=b"\x01\x00" * 2_400)
 
 
 def test_cache_key_includes_full_model_and_config_content(tmp_path):
@@ -54,7 +62,7 @@ def test_cache_hit_is_atomic_and_corrupt_cache_is_regenerated(tmp_path, monkeypa
     assert cached.is_file() and not list((cache_root / "tts").glob("*.partial"))
 
     class _FailVoice:
-        def synthesize_wav(self, *_args):
+        def synthesize(self, *_args):
             raise AssertionError("cache miss unexpectedly loaded Piper")
 
     hit = tts.PiperSynthesizer(model, config); hit._voice = _FailVoice()
@@ -68,6 +76,33 @@ def test_cache_hit_is_atomic_and_corrupt_cache_is_regenerated(tmp_path, monkeypa
     repaired.synthesize("Xin chào", repaired_output, cache_root=cache_root)
     assert _duration_from_wave(repaired_output) > 0
     assert not list((cache_root / "tts").glob("*.partial"))
+
+
+def test_chunks_are_written_as_one_wav(tmp_path, monkeypatch):
+    model = tmp_path / "voice.onnx"; model.write_bytes(b"model")
+    monkeypatch.setattr(tts, "audio_duration", _duration_from_wave)
+    voice = tts.PiperSynthesizer(model); voice._voice = _FakeVoice(chunks=3)
+    output = tmp_path / "out.wav"
+    voice.synthesize("Xin chào", output, cache_root=tmp_path / "cache")
+    assert _duration_from_wave(output) == pytest.approx(0.15)
+
+
+def test_punctuation_without_audio_becomes_short_pause(tmp_path, monkeypatch):
+    model = tmp_path / "voice.onnx"; model.write_bytes(b"model")
+    monkeypatch.setattr(tts, "audio_duration", _duration_from_wave)
+    voice = tts.PiperSynthesizer(model); voice._voice = _FakeVoice(chunks=0)
+    output = tmp_path / "pause.wav"
+    voice.synthesize("...", output, cache_root=tmp_path / "cache")
+    assert _duration_from_wave(output) == pytest.approx(0.4)
+
+
+def test_words_without_audio_fail_instead_of_writing_broken_wav(tmp_path, monkeypatch):
+    model = tmp_path / "voice.onnx"; model.write_bytes(b"model")
+    monkeypatch.setattr(tts, "audio_duration", _duration_from_wave)
+    voice = tts.PiperSynthesizer(model); voice._voice = _FakeVoice(chunks=0)
+    with pytest.raises(tts.MediaError):
+        voice.synthesize("Xin chào", tmp_path / "empty.wav", cache_root=tmp_path / "cache")
+    assert not list(tmp_path.glob("*.wav")) and not list(tmp_path.glob(".*.partial"))
 
 
 def test_oversize_fit_runs_tempo_without_speech_trimming(tmp_path, monkeypatch):
